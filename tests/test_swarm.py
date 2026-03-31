@@ -15,13 +15,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from docswarm.agents.swarm import DocSwarm
 from docswarm.agents.tools.db_tools import create_db_tools
 from docswarm.agents.tools.entity_tools import create_entity_tools
-from docswarm.agents.tools.file_tools import create_file_read_tools, create_file_tools
+from docswarm.agents.tools.file_tools import create_file_read_tools
 from docswarm.agents.tools.pdf_tools import create_pdf_tools
-
 
 # ---------------------------------------------------------------------------
 # Shared mock LLM factory
 # ---------------------------------------------------------------------------
+
 
 class _MockLLM(BaseChatModel):
     """Minimal BaseChatModel that returns a fixed AIMessage and supports bind_tools."""
@@ -39,9 +39,7 @@ class _MockLLM(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return ChatResult(
-            generations=[ChatGeneration(message=AIMessage(content=self.response))]
-        )
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response))])
 
     def bind_tools(self, tools, **kwargs):  # type: ignore[override]
         return self
@@ -66,6 +64,7 @@ def _make_mock_wiki_client():
 # ---------------------------------------------------------------------------
 # Swarm init
 # ---------------------------------------------------------------------------
+
 
 class TestSwarmInit:
     def test_swarm_can_be_instantiated(self, tmp_config, db):
@@ -97,6 +96,7 @@ class TestSwarmInit:
 # Tool factory counts
 # ---------------------------------------------------------------------------
 
+
 class TestToolFactoryCounts:
     def test_tool_factory_output_counts(self, tmp_config, db):
         """Verify each tool factory produces the expected number of tools."""
@@ -121,16 +121,25 @@ class TestToolFactoryCounts:
 
         expected_names = {
             # db_tools (7)
-            "search_chunks", "get_chunk", "get_page_text",
-            "list_documents", "get_document_chunks",
-            "get_page_study_status", "mark_page_studied",
+            "search_chunks",
+            "get_chunk",
+            "get_page_text",
+            "list_documents",
+            "get_document_chunks",
+            "get_page_study_status",
+            "mark_page_studied",
             # entity_tools (4)
-            "save_entity", "search_entities",
-            "get_entities_for_page", "get_entity_mentions",
+            "save_entity",
+            "search_entities",
+            "get_entities_for_page",
+            "get_entity_mentions",
             # pdf_tools (2)
-            "get_page_image_info", "get_source_reference",
+            "get_page_image_info",
+            "get_source_reference",
             # file_read_tools (3)
-            "read_article_file", "list_article_files", "search_article_files",
+            "read_article_file",
+            "list_article_files",
+            "search_article_files",
         }
         assert names == expected_names
 
@@ -138,6 +147,7 @@ class TestToolFactoryCounts:
 # ---------------------------------------------------------------------------
 # Tool schema serialization
 # ---------------------------------------------------------------------------
+
 
 class TestToolSchemaSerialization:
     def test_all_researcher_tool_schemas_serialize_to_json(self, tmp_config, db):
@@ -172,19 +182,21 @@ class TestToolSchemaSerialization:
         db_tools = create_db_tools(db)
         for t in db_tools:
             schema = t.args_schema.schema() if t.args_schema else {}
-            assert "properties" in schema or "title" in schema, (
-                f"Tool {t.name!r} schema missing expected keys: {schema}"
-            )
+            assert (
+                "properties" in schema or "title" in schema
+            ), f"Tool {t.name!r} schema missing expected keys: {schema}"
 
 
 # ---------------------------------------------------------------------------
 # Researcher invoke with mock LLM
 # ---------------------------------------------------------------------------
 
+
 class TestResearcherInvokeWithMockLLM:
     def test_invoke_does_not_crash_with_short_message(self, tmp_config, db):
         """Researcher invoke works with a short message and mocked LLM."""
         from langgraph.prebuilt import create_react_agent
+
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
         db_tools = create_db_tools(db)
@@ -205,6 +217,7 @@ class TestResearcherInvokeWithMockLLM:
 
     def test_last_message_is_ai_message(self, tmp_config, db):
         from langgraph.prebuilt import create_react_agent
+
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
         tools = create_db_tools(db) + create_entity_tools(db)
@@ -220,10 +233,12 @@ class TestResearcherInvokeWithMockLLM:
 # Researcher invoke with all tools
 # ---------------------------------------------------------------------------
 
+
 class TestResearcherInvokeWithAllTools:
     def test_create_react_agent_accepts_all_tools(self, tmp_config, db):
         """Verify create_react_agent works with the full set of available tools."""
         from langgraph.prebuilt import create_react_agent
+
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
         db_tools = create_db_tools(db)
@@ -235,9 +250,7 @@ class TestResearcherInvokeWithAllTools:
         mock_llm = _make_mock_llm()
         researcher = create_react_agent(mock_llm, tools=research_tools, prompt=RESEARCHER_PROMPT)
 
-        result = researcher.invoke({
-            "messages": [HumanMessage(content="List what you know.")]
-        })
+        result = researcher.invoke({"messages": [HumanMessage(content="List what you know.")]})
         assert result is not None
         assert "messages" in result
 
@@ -260,6 +273,7 @@ class TestResearcherInvokeWithAllTools:
 # ---------------------------------------------------------------------------
 # Researcher invoke with long message
 # ---------------------------------------------------------------------------
+
 
 class TestResearcherInvokeWithLongMessage:
     def test_invoke_with_2500_char_page_text(self, tmp_config, db):
@@ -318,7 +332,6 @@ class TestResearcherInvokeWithLongMessage:
 
     def test_message_size_is_logged(self, tmp_config, db):
         """Diagnostic: print message size for comparison against crash conditions."""
-        from langgraph.prebuilt import create_react_agent
 
         page_text = "word " * 500  # 2500 chars
         initial_content = (
@@ -333,6 +346,7 @@ class TestResearcherInvokeWithLongMessage:
 # Salvage articles
 # ---------------------------------------------------------------------------
 
+
 class TestSalvageArticles:
     def _make_swarm(self, tmp_config, db):
         mock_llm = _make_mock_llm()
@@ -345,11 +359,16 @@ class TestSalvageArticles:
         swarm = self._make_swarm(tmp_config, db)
         # Register two entities for the sample page
         eid1 = db.upsert_entity("Thomas Chippendale", "person")
-        db.add_entity_mention(eid1, sample_page["id"], sample_page["document_id"],
-                              "Famous cabinet-maker from Yorkshire.")
+        db.add_entity_mention(
+            eid1,
+            sample_page["id"],
+            sample_page["document_id"],
+            "Famous cabinet-maker from Yorkshire.",
+        )
         eid2 = db.upsert_entity("Weinmann", "organisation")
-        db.add_entity_mention(eid2, sample_page["id"], sample_page["document_id"],
-                              "Swiss brake manufacturer.")
+        db.add_entity_mention(
+            eid2, sample_page["id"], sample_page["document_id"], "Swiss brake manufacturer."
+        )
 
         path = swarm._salvage_articles(
             messages=[HumanMessage(content="Initial"), AIMessage(content="Done.")],
@@ -359,6 +378,7 @@ class TestSalvageArticles:
         )
         assert path != ""
         from pathlib import Path
+
         root = Path(tmp_config.wiki_output_dir)
         person_file = root / "person" / "thomas-chippendale.md"
         org_file = root / "organisation" / "weinmann.md"
@@ -371,14 +391,15 @@ class TestSalvageArticles:
         """If the writer produced === ARTICLE === blocks, use that content."""
         swarm = self._make_swarm(tmp_config, db)
         eid = db.upsert_entity("Reg Harris", "person")
-        db.add_entity_mention(eid, sample_page["id"], sample_page["document_id"],
-                              "Champion cyclist.")
+        db.add_entity_mention(
+            eid, sample_page["id"], sample_page["document_id"], "Champion cyclist."
+        )
 
         writer_output = (
             "=== ARTICLE: Reg Harris ===\n"
             "**Reg Harris** was a British cycling champion.\n\n"
             "He won multiple world titles.\n\n"
-            "[Source: \"Test Doc\", p.1]\n"
+            '[Source: "Test Doc", p.1]\n'
             "=== END ARTICLE ==="
         )
         path = swarm._salvage_articles(
@@ -389,6 +410,7 @@ class TestSalvageArticles:
         )
         assert path != ""
         from pathlib import Path
+
         saved = Path(tmp_config.wiki_output_dir) / "person" / "reg-harris.md"
         assert saved.exists()
         text = saved.read_text()
@@ -429,6 +451,7 @@ class TestSalvageArticles:
 
         # Pre-create the file
         from pathlib import Path
+
         existing = Path(tmp_config.wiki_output_dir) / "concept" / "existing-entity.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("# Already here\n")
@@ -449,6 +472,7 @@ class TestSalvageArticles:
 # run_for_page always marks studied
 # ---------------------------------------------------------------------------
 
+
 class TestRunForPageAlwaysMarksStudied:
     def test_page_marked_studied_even_if_swarm_fails(
         self, tmp_config, db, sample_page, sample_document
@@ -465,6 +489,7 @@ class TestRunForPageAlwaysMarksStudied:
 
         # Patch _graph.invoke to return a minimal (but valid) state
         from unittest.mock import patch as upatch
+
         fake_result = {"messages": [AIMessage(content="Short.")], "active_agent": "editor"}
         with upatch.object(swarm._graph, "invoke", return_value=fake_result):
             swarm.run_for_page(sample_page)
@@ -477,6 +502,7 @@ class TestRunForPageAlwaysMarksStudied:
 # ---------------------------------------------------------------------------
 # run_full_wiki stops when all studied
 # ---------------------------------------------------------------------------
+
 
 class TestRunFullWikiStopsWhenAllStudied:
     def test_stops_immediately_when_no_unstudied_pages(self, tmp_config, db):
@@ -511,6 +537,7 @@ class TestRunFullWikiStopsWhenAllStudied:
 # Reviewer routing
 # ---------------------------------------------------------------------------
 
+
 class TestRouteFromReviewer:
     def _make_swarm(self, tmp_config, db):
         mock_llm = _make_mock_llm()
@@ -542,17 +569,20 @@ class TestRouteFromReviewer:
         result = swarm._route_from_reviewer(state)
         assert result == "writer"
 
-    @pytest.mark.parametrize("keyword", [
-        "revision needed",
-        "needs revision",
-        "revise",
-        "rewrite",
-        "return to writer",
-        "back to writer",
-        "incorrect",
-        "inaccurate",
-        "unsupported claim",
-    ])
+    @pytest.mark.parametrize(
+        "keyword",
+        [
+            "revision needed",
+            "needs revision",
+            "revise",
+            "rewrite",
+            "return to writer",
+            "back to writer",
+            "incorrect",
+            "inaccurate",
+            "unsupported claim",
+        ],
+    )
     def test_routes_to_writer_for_each_keyword(self, tmp_config, db, keyword):
         swarm = self._make_swarm(tmp_config, db)
         state = {
@@ -584,13 +614,11 @@ class TestRouteFromReviewer:
         swarm = self._make_swarm(tmp_config, db)
         state = {
             "messages": [
-                AIMessage(content="revision needed here"),       # older — needs revision
-                AIMessage(content="The article looks great."),   # newer — approved
+                AIMessage(content="revision needed here"),  # older — needs revision
+                AIMessage(content="The article looks great."),  # newer — approved
             ],
             "active_agent": "reviewer",
         }
         # Most recent message approves → should route to editor
         result = swarm._route_from_reviewer(state)
         assert result == "editor"
-
-

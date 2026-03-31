@@ -85,9 +85,7 @@ def create_wiki_tools(wiki_client: "WikiJSClient", db: "DatabaseManager") -> lis
         return "\n".join(lines)
 
     @tool
-    def create_wiki_page(
-        title: str, content: str, path: str, description: str = ""
-    ) -> str:
+    def create_wiki_page(title: str, content: str, path: str, description: str = "") -> str:
         """Create a new wiki page and record it in the local database.
 
         The page path should follow the pattern ``topic/subtopic`` using
@@ -133,9 +131,7 @@ def create_wiki_tools(wiki_client: "WikiJSClient", db: "DatabaseManager") -> lis
         )
 
     @tool
-    def update_wiki_page(
-        page_id: int, title: str, content: str, description: str = ""
-    ) -> str:
+    def update_wiki_page(page_id: int, title: str, content: str, description: str = "") -> str:
         """Update an existing wiki page and refresh the local database record.
 
         Args:

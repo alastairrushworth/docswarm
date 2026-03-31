@@ -22,10 +22,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 if __name__ == "__main__":
-    from docswarm.config import Config
-    from docswarm.wiki.client import WikiJSClient
     from docswarm.agents.tools.file_tools import _build_front_matter, _parse_front_matter
+    from docswarm.config import Config
     from docswarm.logger import get_logger
+    from docswarm.wiki.client import WikiJSClient
 
     log = get_logger(__name__)
     config = Config.from_env()

@@ -29,6 +29,7 @@ SAMPLE_DOC_ID = "doc-uuid-5678"
 # chunk_page – basic behaviour
 # ---------------------------------------------------------------------------
 
+
 class TestChunkPage:
     def test_empty_string_returns_empty_list(self, chunker):
         result = chunker.chunk_page(
@@ -81,7 +82,9 @@ class TestChunkPage:
         assert len(result) > 1
         for chunk in result:
             # Allow a little slack for overlap text
-            assert len(chunk["text"]) <= chunker.config.chunk_size + chunker.config.chunk_overlap + 50
+            assert (
+                len(chunk["text"]) <= chunker.config.chunk_size + chunker.config.chunk_overlap + 50
+            )
 
     def test_chunk_fields_present(self, chunker):
         result = chunker.chunk_page(
@@ -96,9 +99,18 @@ class TestChunkPage:
         assert len(result) == 1
         chunk = result[0]
         required_fields = {
-            "id", "document_id", "page_id", "page_number", "chunk_index",
-            "text", "char_start", "char_end", "chunk_type", "ocr_confidence",
-            "reference", "word_count",
+            "id",
+            "document_id",
+            "page_id",
+            "page_number",
+            "chunk_index",
+            "text",
+            "char_start",
+            "char_end",
+            "chunk_type",
+            "ocr_confidence",
+            "reference",
+            "word_count",
         }
         assert required_fields.issubset(chunk.keys())
 
@@ -212,6 +224,7 @@ class TestChunkPage:
 # Overlap behaviour
 # ---------------------------------------------------------------------------
 
+
 class TestOverlap:
     def test_consecutive_chunks_share_text(self, chunker):
         """The start of chunk N+1 should contain text from the tail of chunk N."""
@@ -255,6 +268,7 @@ class TestOverlap:
 # _split_paragraphs
 # ---------------------------------------------------------------------------
 
+
 class TestSplitParagraphs:
     def test_splits_on_double_newline(self, chunker):
         result = chunker._split_paragraphs("First paragraph.\n\nSecond paragraph.")
@@ -281,6 +295,7 @@ class TestSplitParagraphs:
 # _merge_segments
 # ---------------------------------------------------------------------------
 
+
 class TestMergeSegments:
     def test_merges_short_paragraphs(self, chunker):
         segments = ["Short.", "Also short.", "Another tiny one."]
@@ -297,8 +312,8 @@ class TestMergeSegments:
 
     def test_does_not_exceed_chunk_size_when_merging(self, chunker):
         # Two segments that together exceed chunk_size should stay separate
-        seg_a = "a " * 100   # 200 chars
-        seg_b = "b " * 100   # 200 chars
+        seg_a = "a " * 100  # 200 chars
+        seg_b = "b " * 100  # 200 chars
         result = chunker._merge_segments([seg_a.strip(), seg_b.strip()])
         assert len(result) >= 2
 
@@ -306,6 +321,7 @@ class TestMergeSegments:
 # ---------------------------------------------------------------------------
 # _split_on_whitespace
 # ---------------------------------------------------------------------------
+
 
 class TestSplitOnWhitespace:
     def test_respects_word_boundaries(self, chunker):

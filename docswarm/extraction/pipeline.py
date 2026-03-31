@@ -128,9 +128,7 @@ class ExtractionPipeline:
             self._print_summary(stats, len(pdf_files))
             return
 
-        log.info(
-            "Submitting %d PDF(s) to %d worker process(es)", len(to_process), _NUM_WORKERS
-        )
+        log.info("Submitting %d PDF(s) to %d worker process(es)", len(to_process), _NUM_WORKERS)
 
         config_dict = {
             "catalog_path": self.config.catalog_path,
@@ -158,10 +156,7 @@ class ExtractionPipeline:
             task = progress.add_task("Extracting PDFs…", total=len(to_process))
 
             with ProcessPoolExecutor(max_workers=_NUM_WORKERS) as pool:
-                futures = {
-                    pool.submit(_extract_worker, str(p), config_dict): p
-                    for p in to_process
-                }
+                futures = {pool.submit(_extract_worker, str(p), config_dict): p for p in to_process}
 
                 for future in as_completed(futures):
                     pdf_path = futures[future]
@@ -181,13 +176,18 @@ class ExtractionPipeline:
                     stats["chunks"] += chunk_count
                     log.info(
                         "Inserted: %s — %d page(s), %d chunk(s)",
-                        pdf_path.name, page_count, chunk_count,
+                        pdf_path.name,
+                        page_count,
+                        chunk_count,
                     )
                     progress.advance(task)
 
         log.info(
             "Extraction complete — processed: %d, skipped: %d, pages: %d, chunks: %d",
-            stats["processed"], stats["skipped"], stats["pages"], stats["chunks"],
+            stats["processed"],
+            stats["skipped"],
+            stats["pages"],
+            stats["chunks"],
         )
         self._print_summary(stats, len(pdf_files))
 

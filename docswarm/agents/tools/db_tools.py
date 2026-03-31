@@ -99,9 +99,7 @@ def create_db_tools(db: "DatabaseManager") -> list:
         """
         chunks = db.get_chunks_by_document(document_id, page_number=page_number)
         if not chunks:
-            return (
-                f"No text found for document {document_id!r}, page {page_number}."
-            )
+            return f"No text found for document {document_id!r}, page {page_number}."
         doc = db.get_document(document_id)
         title = doc.get("title", document_id) if doc else document_id
         header = f'=== Page {page_number} of "{title}" ===\n'
@@ -172,7 +170,11 @@ def create_db_tools(db: "DatabaseManager") -> list:
         for r in rows:
             doc = db.get_document(r["document_id"])
             doc_title = doc.get("title", r["document_id"]) if doc else r["document_id"]
-            status = f"studied {r['study_count']}x (last: {r['last_studied']})" if r["study_count"] else "UNSTUDIED"
+            status = (
+                f"studied {r['study_count']}x (last: {r['last_studied']})"
+                if r["study_count"]
+                else "UNSTUDIED"
+            )
             lines.append(f"{doc_title}  p.{r['page_number']}  [{status}]  page_id={r['id']}")
         return "\n".join(lines)
 

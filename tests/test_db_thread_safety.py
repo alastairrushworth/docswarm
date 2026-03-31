@@ -11,8 +11,6 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 
-import pytest
-
 
 class TestConcurrentReads:
     def test_parallel_search_chunks_does_not_crash(self, db, sample_chunks):
@@ -38,6 +36,7 @@ class TestConcurrentReads:
 
     def test_mixed_read_operations_in_parallel(self, db, sample_chunks, sample_document):
         """Mix of different read operations running concurrently."""
+
         def read_ops():
             db.search_chunks("test")
             db.list_documents()
@@ -53,6 +52,7 @@ class TestConcurrentReads:
 class TestConcurrentWrites:
     def test_parallel_entity_inserts_do_not_crash(self, db, sample_page):
         """Multiple threads inserting entities simultaneously."""
+
         def insert_entity(name):
             eid = db.upsert_entity(name=name, entity_type="person")
             db.add_entity_mention(

@@ -11,10 +11,10 @@ import pytest
 
 from docswarm.wiki.client import WikiJSClient
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def client():
@@ -36,6 +36,7 @@ def _mock_response(data: dict, status_code: int = 200):
 def _mock_error_response(status_code: int = 500):
     """Build a mock httpx.Response that raises on raise_for_status()."""
     import httpx
+
     mock_resp = MagicMock()
     mock_resp.status_code = status_code
     mock_resp.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -47,6 +48,7 @@ def _mock_error_response(status_code: int = 500):
 # ---------------------------------------------------------------------------
 # list_pages
 # ---------------------------------------------------------------------------
+
 
 class TestListPages:
     def test_returns_list_of_page_dicts(self, client):
@@ -82,6 +84,7 @@ class TestListPages:
 # ---------------------------------------------------------------------------
 # get_page
 # ---------------------------------------------------------------------------
+
 
 class TestGetPage:
     def test_returns_page_dict(self, client):
@@ -120,6 +123,7 @@ class TestGetPage:
 # ---------------------------------------------------------------------------
 # create_page
 # ---------------------------------------------------------------------------
+
 
 class TestCreatePage:
     def _success_response(self, page_id=42, path="test/path", title="Test"):
@@ -192,6 +196,7 @@ class TestCreatePage:
 # update_page
 # ---------------------------------------------------------------------------
 
+
 class TestUpdatePage:
     def _success_response(self, page_id=1, path="updated/path", title="Updated"):
         data = {
@@ -256,6 +261,7 @@ class TestUpdatePage:
 # delete_page
 # ---------------------------------------------------------------------------
 
+
 class TestDeletePage:
     def _success_response(self):
         data = {
@@ -305,11 +311,22 @@ class TestDeletePage:
 # search_pages
 # ---------------------------------------------------------------------------
 
+
 class TestSearchPages:
     def test_returns_list_of_results(self, client):
         results_data = [
-            {"id": 1, "title": "Chippendale", "path": "people/chippendale", "description": "Furniture maker"},
-            {"id": 2, "title": "Sheraton", "path": "people/sheraton", "description": "Another maker"},
+            {
+                "id": 1,
+                "title": "Chippendale",
+                "path": "people/chippendale",
+                "description": "Furniture maker",
+            },
+            {
+                "id": 2,
+                "title": "Sheraton",
+                "path": "people/sheraton",
+                "description": "Another maker",
+            },
         ]
         mock_resp = _mock_response({"pages": {"search": {"results": results_data}}})
         client._client.post.return_value = mock_resp
@@ -339,9 +356,11 @@ class TestSearchPages:
 # _graphql error handling
 # ---------------------------------------------------------------------------
 
+
 class TestGraphqlErrorHandling:
     def test_raises_http_status_error_on_non_2xx(self, client):
         import httpx
+
         client._client.post.return_value = _mock_error_response(503)
 
         with pytest.raises(httpx.HTTPStatusError):
@@ -389,6 +408,7 @@ class TestGraphqlErrorHandling:
 # ---------------------------------------------------------------------------
 # Client lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestWikiClientLifecycle:
     def test_close_calls_http_client_close(self, client):

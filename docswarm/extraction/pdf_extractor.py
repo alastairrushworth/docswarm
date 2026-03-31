@@ -95,19 +95,23 @@ class PDFExtractor:
 
                 log.debug(
                     "Page %d OCR confidence: %.1f%%, words: %d",
-                    page_num + 1, confidence, word_count,
+                    page_num + 1,
+                    confidence,
+                    word_count,
                 )
 
-                page_records.append({
-                    "document_id": document_id,
-                    "page_number": page_num + 1,
-                    "width_pts": page.rect.width,
-                    "height_pts": page.rect.height,
-                    "image_path": image_path,
-                    "raw_text": text,
-                    "ocr_confidence": confidence,
-                    "word_count": word_count,
-                })
+                page_records.append(
+                    {
+                        "document_id": document_id,
+                        "page_number": page_num + 1,
+                        "width_pts": page.rect.width,
+                        "height_pts": page.rect.height,
+                        "image_path": image_path,
+                        "raw_text": text,
+                        "ocr_confidence": confidence,
+                        "word_count": word_count,
+                    }
+                )
         finally:
             doc.close()
 

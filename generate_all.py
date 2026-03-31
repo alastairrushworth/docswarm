@@ -14,9 +14,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 if __name__ == "__main__":
+    from docswarm.agents.swarm import DocSwarm
     from docswarm.config import Config
     from docswarm.storage.database import DatabaseManager
-    from docswarm.agents.swarm import DocSwarm
     from docswarm.wiki.client import WikiJSClient
 
     config = Config.from_env()

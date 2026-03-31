@@ -6,7 +6,6 @@ Tesseract installation is needed.
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,10 +14,10 @@ from PIL import Image
 from docswarm.config import Config
 from docswarm.extraction.pdf_extractor import PDFExtractor
 
-
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def extractor(tmp_path):
@@ -49,6 +48,7 @@ def _mock_fitz_doc(page_count=2, page_width=595.0, page_height=842.0):
 # extract_document_data
 # ---------------------------------------------------------------------------
 
+
 class TestExtractDocumentData:
     def test_returns_document_and_page_records_tuple(self, extractor, tmp_path):
         fake_pdf = tmp_path / "sample.pdf"
@@ -56,9 +56,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=3)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("Sample OCR text here.", 91.5)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("Sample OCR text here.", 91.5)),
+        ):
             doc_record, page_records = extractor.extract_document_data(str(fake_pdf))
 
         assert isinstance(doc_record, dict)
@@ -70,9 +72,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         required = {"id", "filename", "filepath", "title", "total_pages", "file_size_bytes"}
@@ -84,9 +88,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["filename"] == "my_report.pdf"
@@ -97,9 +103,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=5)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["total_pages"] == 5
@@ -110,9 +118,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=3)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 88.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 88.0)),
+        ):
             _, page_records = extractor.extract_document_data(str(fake_pdf))
 
         assert len(page_records) == 3
@@ -123,9 +133,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=4)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             _, page_records = extractor.extract_document_data(str(fake_pdf))
 
         page_numbers = [p["page_number"] for p in page_records]
@@ -138,9 +150,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["title"] == "Victorian Furniture Catalogue"
@@ -151,9 +165,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["title"] == "Antique Book Collection"
@@ -164,9 +180,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["id"]
@@ -178,9 +196,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc_record, _ = extractor.extract_document_data(str(fake_pdf))
 
         assert doc_record["file_size_bytes"] > 0
@@ -191,9 +211,11 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("Hello OCR world", 95.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("Hello OCR world", 95.0)),
+        ):
             _, page_records = extractor.extract_document_data(str(fake_pdf))
 
         assert page_records[0]["raw_text"] == "Hello OCR world"
@@ -205,16 +227,20 @@ class TestExtractDocumentData:
 
         mock_doc, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc1, _ = extractor.extract_document_data(str(fake_pdf))
 
         mock_doc2, _ = _mock_fitz_doc(page_count=1)
 
-        with patch("fitz.open", return_value=mock_doc2), \
-             patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()), \
-             patch.object(extractor, "ocr_page", return_value=("text", 90.0)):
+        with (
+            patch("fitz.open", return_value=mock_doc2),
+            patch.object(extractor, "_render_fitz_page", return_value=_make_rgb_image()),
+            patch.object(extractor, "ocr_page", return_value=("text", 90.0)),
+        ):
             doc2, _ = extractor.extract_document_data(str(fake_pdf))
 
         # Both calls return distinct document IDs (two separate extractions)
@@ -224,6 +250,7 @@ class TestExtractDocumentData:
 # ---------------------------------------------------------------------------
 # ocr_page
 # ---------------------------------------------------------------------------
+
 
 class TestOcrPage:
     def test_returns_text_and_confidence_tuple(self, extractor):
@@ -288,6 +315,7 @@ class TestOcrPage:
 # ---------------------------------------------------------------------------
 # _preprocess_image
 # ---------------------------------------------------------------------------
+
 
 class TestPreprocessImage:
     def test_returns_grayscale_image(self, extractor):

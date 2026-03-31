@@ -25,9 +25,7 @@ def create_entity_tools(db: "DatabaseManager") -> list:
     """
 
     @tool
-    def save_entity(
-        name: str, entity_type: str, page_id: str, context_text: str = ""
-    ) -> str:
+    def save_entity(name: str, entity_type: str, page_id: str, context_text: str = "") -> str:
         """Save a named entity found on a source page.
 
         Call this once per entity identified on the page being researched.

@@ -47,9 +47,7 @@ def create_pdf_tools(db: "DatabaseManager") -> list:
         if not pages:
             return f"No pages found for document {document_id!r}."
 
-        page = next(
-            (p for p in pages if p.get("page_number") == page_number), None
-        )
+        page = next((p for p in pages if p.get("page_number") == page_number), None)
         if page is None:
             return (
                 f"Page {page_number} not found in document {document_id!r}. "
@@ -60,7 +58,7 @@ def create_pdf_tools(db: "DatabaseManager") -> list:
         exists = Path(image_path).exists() if image_path != "N/A" else False
 
         lines = [
-            f"=== Page image info ===",
+            "=== Page image info ===",
             f"Document ID:   {document_id}",
             f"Page number:   {page_number}",
             f"Image path:    {image_path}",
@@ -99,12 +97,11 @@ def create_pdf_tools(db: "DatabaseManager") -> list:
             total_pages = "N/A"
 
         reference = chunk.get("reference") or (
-            f'"{title}" (p.{chunk.get("page_number")}, '
-            f'chunk {chunk.get("chunk_index", 0) + 1})'
+            f'"{title}" (p.{chunk.get("page_number")}, ' f'chunk {chunk.get("chunk_index", 0) + 1})'
         )
 
         lines = [
-            f"=== Source citation ===",
+            "=== Source citation ===",
             f"Reference:   {reference}",
             f"Chunk ID:    {chunk_id}",
             f"Document:    {title}",
@@ -113,7 +110,7 @@ def create_pdf_tools(db: "DatabaseManager") -> list:
             f"Chunk index: {chunk.get('chunk_index')}",
             f"OCR conf:    {chunk.get('ocr_confidence', 'N/A')}",
             "",
-            f"Text excerpt:",
+            "Text excerpt:",
             (chunk.get("text") or "")[:400] + ("…" if len(chunk.get("text") or "") > 400 else ""),
         ]
         return "\n".join(lines)
@@ -180,14 +177,16 @@ def create_classification_tools(db: "DatabaseManager", model: str, ollama_base_u
             "CLASSIFICATION: <advertisement|editorial|mixed> — <one sentence reason>"
         )
 
-        payload = json.dumps({
-            "model": model,
-            "prompt": prompt,
-            "images": [img_b64],
-            "stream": False,
-            "options": {"num_predict": 80},
-            "think": False,
-        }).encode()
+        payload = json.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "images": [img_b64],
+                "stream": False,
+                "options": {"num_predict": 80},
+                "think": False,
+            }
+        ).encode()
 
         try:
             req = urllib.request.Request(

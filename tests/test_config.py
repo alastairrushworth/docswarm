@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from docswarm.config import Config
 
 
@@ -142,10 +140,17 @@ class TestConfigFromEnvFallsBackToDefaults:
     def test_all_defaults_match_when_no_env(self, monkeypatch):
         """from_env() with no env vars should produce the same config as Config()."""
         env_keys = [
-            "DOCSWARM_CATALOG_PATH", "DOCSWARM_DATA_PATH", "DOCSWARM_PDF_DIR",
-            "DOCSWARM_PAGES_DIR", "DOCSWARM_WIKI_URL", "DOCSWARM_WIKI_API_KEY",
-            "DOCSWARM_WIKI_OUTPUT_DIR", "DOCSWARM_OLLAMA_BASE_URL",
-            "DOCSWARM_OCR_LANGUAGE", "DOCSWARM_CHUNK_SIZE", "DOCSWARM_CHUNK_OVERLAP",
+            "DOCSWARM_CATALOG_PATH",
+            "DOCSWARM_DATA_PATH",
+            "DOCSWARM_PDF_DIR",
+            "DOCSWARM_PAGES_DIR",
+            "DOCSWARM_WIKI_URL",
+            "DOCSWARM_WIKI_API_KEY",
+            "DOCSWARM_WIKI_OUTPUT_DIR",
+            "DOCSWARM_OLLAMA_BASE_URL",
+            "DOCSWARM_OCR_LANGUAGE",
+            "DOCSWARM_CHUNK_SIZE",
+            "DOCSWARM_CHUNK_OVERLAP",
             "DOCSWARM_MODEL",
         ]
         for key in env_keys:

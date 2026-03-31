@@ -233,19 +233,13 @@ class DatabaseManager:
         return doc_id
 
     def get_document(self, doc_id: str) -> dict | None:
-        return self._query_one(
-            f"SELECT * FROM {_LAKE}.documents WHERE id = ?", [doc_id]
-        )
+        return self._query_one(f"SELECT * FROM {_LAKE}.documents WHERE id = ?", [doc_id])
 
     def get_document_by_filename(self, filename: str) -> dict | None:
-        return self._query_one(
-            f"SELECT * FROM {_LAKE}.documents WHERE filename = ?", [filename]
-        )
+        return self._query_one(f"SELECT * FROM {_LAKE}.documents WHERE filename = ?", [filename])
 
     def list_documents(self) -> list[dict]:
-        return self._query_all(
-            f"SELECT * FROM {_LAKE}.documents ORDER BY ingested_at DESC"
-        )
+        return self._query_all(f"SELECT * FROM {_LAKE}.documents ORDER BY ingested_at DESC")
 
     # ------------------------------------------------------------------
     # Pages
@@ -273,15 +267,11 @@ class DatabaseManager:
                 _now(),
             ],
         )
-        log.debug(
-            "Inserted page %s (doc %s)", page.get("page_number"), page.get("document_id")
-        )
+        log.debug("Inserted page %s (doc %s)", page.get("page_number"), page.get("document_id"))
         return page_id
 
     def get_page(self, page_id: str) -> dict | None:
-        return self._query_one(
-            f"SELECT * FROM {_LAKE}.pages WHERE id = ?", [page_id]
-        )
+        return self._query_one(f"SELECT * FROM {_LAKE}.pages WHERE id = ?", [page_id])
 
     def get_document_pages(self, document_id: str) -> list[dict]:
         return self._query_all(
@@ -333,9 +323,7 @@ class DatabaseManager:
         return chunk_id
 
     def get_chunk(self, chunk_id: str) -> dict | None:
-        return self._query_one(
-            f"SELECT * FROM {_LAKE}.chunks WHERE id = ?", [chunk_id]
-        )
+        return self._query_one(f"SELECT * FROM {_LAKE}.chunks WHERE id = ?", [chunk_id])
 
     def get_page_chunks(self, page_id: str) -> list[dict]:
         return self._query_all(
@@ -368,7 +356,7 @@ class DatabaseManager:
         terms = [t for t in query.split() if t]
         if not terms:
             return []
-        conditions = " AND ".join([f"text ILIKE ?" for _ in terms])
+        conditions = " AND ".join(["text ILIKE ?" for _ in terms])
         params: list[Any] = [f"%{t}%" for t in terms] + [limit]
         results = self._query_all(
             f"""
@@ -388,9 +376,7 @@ class DatabaseManager:
 
     def upsert_wiki_article(self, article: dict) -> str:
         path = article.get("path", "")
-        existing = self._query_one(
-            f"SELECT id FROM {_LAKE}.wiki_articles WHERE path = ?", [path]
-        )
+        existing = self._query_one(f"SELECT id FROM {_LAKE}.wiki_articles WHERE path = ?", [path])
 
         source_chunk_ids = article.get("source_chunk_ids") or []
         source_document_ids = article.get("source_document_ids") or []
@@ -445,9 +431,7 @@ class DatabaseManager:
         return article_id
 
     def get_wiki_articles(self) -> list[dict]:
-        return self._query_all(
-            f"SELECT * FROM {_LAKE}.wiki_articles ORDER BY created_at DESC"
-        )
+        return self._query_all(f"SELECT * FROM {_LAKE}.wiki_articles ORDER BY created_at DESC")
 
     # ------------------------------------------------------------------
     # Entities
@@ -465,9 +449,7 @@ class DatabaseManager:
             The UUID of the entity record.
         """
         with self._lock:
-            cur = self.conn.execute(
-                f"SELECT id FROM {_LAKE}.entities WHERE name = ?", [name]
-            )
+            cur = self.conn.execute(f"SELECT id FROM {_LAKE}.entities WHERE name = ?", [name])
             row = cur.fetchone()
             if row is not None:
                 return row[0]
@@ -525,9 +507,7 @@ class DatabaseManager:
 
     def get_entity_by_name(self, name: str) -> dict | None:
         """Retrieve an entity by exact name."""
-        return self._query_one(
-            f"SELECT * FROM {_LAKE}.entities WHERE name = ?", [name]
-        )
+        return self._query_one(f"SELECT * FROM {_LAKE}.entities WHERE name = ?", [name])
 
     def get_entity_mentions(self, entity_id: str) -> list[dict]:
         """Return all page mentions for an entity, ordered by document and page."""
@@ -564,9 +544,7 @@ class DatabaseManager:
     # Page studies
     # ------------------------------------------------------------------
 
-    def log_page_study(
-        self, page_id: str, document_id: str, wiki_article_path: str = ""
-    ) -> str:
+    def log_page_study(self, page_id: str, document_id: str, wiki_article_path: str = "") -> str:
         """Record that a page has been studied by the swarm.
 
         Args:
@@ -596,9 +574,7 @@ class DatabaseManager:
         Uses Python-level set difference to avoid JOIN (DuckLake JOIN crash on ARM).
         """
         with self._lock:
-            studied_cur = self.conn.execute(
-                f"SELECT DISTINCT page_id FROM {_LAKE}.page_studies"
-            )
+            studied_cur = self.conn.execute(f"SELECT DISTINCT page_id FROM {_LAKE}.page_studies")
             studied_ids = {row[0] for row in studied_cur.fetchall()}
 
             pages_cur = self.conn.execute(
@@ -619,9 +595,7 @@ class DatabaseManager:
         Uses Python-level aggregation to avoid JOIN (DuckLake JOIN crash on ARM).
         """
         with self._lock:
-            studies_cur = self.conn.execute(
-                f"SELECT page_id, studied_at FROM {_LAKE}.page_studies"
-            )
+            studies_cur = self.conn.execute(f"SELECT page_id, studied_at FROM {_LAKE}.page_studies")
             study_rows = studies_cur.fetchall()
 
         counts: dict[str, int] = defaultdict(int)
@@ -631,18 +605,21 @@ class DatabaseManager:
             if page_id not in last_studied or studied_at > last_studied[page_id]:
                 last_studied[page_id] = studied_at
 
-        pages = self._query_all(
-            f"SELECT * FROM {_LAKE}.pages ORDER BY document_id, page_number"
-        )
+        pages = self._query_all(f"SELECT * FROM {_LAKE}.pages ORDER BY document_id, page_number")
         results = []
         for p in pages:
             pid = p["id"]
-            results.append({
-                **p,
-                "study_count": counts.get(pid, 0),
-                "last_studied": last_studied.get(pid),
-            })
-        return sorted(results, key=lambda r: (r["study_count"], r.get("document_id", ""), r.get("page_number", 0)))
+            results.append(
+                {
+                    **p,
+                    "study_count": counts.get(pid, 0),
+                    "last_studied": last_studied.get(pid),
+                }
+            )
+        return sorted(
+            results,
+            key=lambda r: (r["study_count"], r.get("document_id", ""), r.get("page_number", 0)),
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle

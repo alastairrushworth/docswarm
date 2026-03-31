@@ -1,8 +1,8 @@
 """docswarm — transform PDF corpora into structured wikis using an AI agent swarm."""
 
+from docswarm.agents.swarm import DocSwarm
 from docswarm.config import Config
 from docswarm.extraction.pipeline import ExtractionPipeline
-from docswarm.agents.swarm import DocSwarm
 from docswarm.storage.database import DatabaseManager
 from docswarm.wiki.client import WikiJSClient
 

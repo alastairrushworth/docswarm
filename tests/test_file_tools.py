@@ -5,16 +5,13 @@ Uses real tmp_path – no mocking needed for filesystem operations.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-import yaml
 
 from docswarm.agents.tools.file_tools import (
+    _build_front_matter,
+    _parse_front_matter,
     create_file_read_tools,
     create_file_tools,
-    _parse_front_matter,
-    _build_front_matter,
 )
 
 
@@ -54,105 +51,126 @@ def search_tool(file_tools):
 # write_article_file
 # ---------------------------------------------------------------------------
 
+
 class TestWriteArticleFile:
     def test_creates_file_at_correct_path(self, write_tool, wiki_dir):
-        result = write_tool.invoke({
-            "path": "people/thomas-chippendale",
-            "title": "Thomas Chippendale",
-            "content": "# Thomas Chippendale\n\nA famous cabinet-maker.",
-        })
+        result = write_tool.invoke(
+            {
+                "path": "people/thomas-chippendale",
+                "title": "Thomas Chippendale",
+                "content": "# Thomas Chippendale\n\nA famous cabinet-maker.",
+            }
+        )
         expected = wiki_dir / "people" / "thomas-chippendale.md"
         assert expected.exists()
         assert str(expected) in result
 
     def test_creates_parent_directories(self, write_tool, wiki_dir):
-        result = write_tool.invoke({
-            "path": "events/great-exhibition/1851",
-            "title": "Great Exhibition 1851",
-            "content": "Article content here.",
-        })
+        write_tool.invoke(
+            {
+                "path": "events/great-exhibition/1851",
+                "title": "Great Exhibition 1851",
+                "content": "Article content here.",
+            }
+        )
         expected = wiki_dir / "events" / "great-exhibition" / "1851.md"
         assert expected.exists()
 
     def test_front_matter_contains_title(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "objects/mahogany-chair",
-            "title": "Mahogany Chair",
-            "content": "Content.",
-        })
+        write_tool.invoke(
+            {
+                "path": "objects/mahogany-chair",
+                "title": "Mahogany Chair",
+                "content": "Content.",
+            }
+        )
         text = (wiki_dir / "objects" / "mahogany-chair.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["title"] == "Mahogany Chair"
 
     def test_front_matter_contains_description(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "objects/oak-table",
-            "title": "Oak Table",
-            "content": "Content.",
-            "description": "A sturdy oak dining table.",
-        })
+        write_tool.invoke(
+            {
+                "path": "objects/oak-table",
+                "title": "Oak Table",
+                "content": "Content.",
+                "description": "A sturdy oak dining table.",
+            }
+        )
         text = (wiki_dir / "objects" / "oak-table.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["description"] == "A sturdy oak dining table."
 
     def test_front_matter_contains_entity_id(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/test-person",
-            "title": "Test Person",
-            "content": "Content.",
-            "entity_id": "eid-12345",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/test-person",
+                "title": "Test Person",
+                "content": "Content.",
+                "entity_id": "eid-12345",
+            }
+        )
         text = (wiki_dir / "people" / "test-person.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["entity_id"] == "eid-12345"
 
     def test_front_matter_contains_entity_type(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/maker",
-            "title": "The Maker",
-            "content": "Content.",
-            "entity_type": "person",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/maker",
+                "title": "The Maker",
+                "content": "Content.",
+                "entity_type": "person",
+            }
+        )
         text = (wiki_dir / "people" / "maker.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["entity_type"] == "person"
 
     def test_front_matter_contains_source_page_id(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/src",
-            "title": "Source",
-            "content": "Content.",
-            "source_page_id": "pid-99",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/src",
+                "title": "Source",
+                "content": "Content.",
+                "source_page_id": "pid-99",
+            }
+        )
         text = (wiki_dir / "people" / "src.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["source_page_id"] == "pid-99"
 
     def test_front_matter_wiki_page_id_is_none_by_default(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "places/london",
-            "title": "London",
-            "content": "Content.",
-        })
+        write_tool.invoke(
+            {
+                "path": "places/london",
+                "title": "London",
+                "content": "Content.",
+            }
+        )
         text = (wiki_dir / "places" / "london.md").read_text()
         meta, _ = _parse_front_matter(text)
         assert meta["wiki_page_id"] is None
 
     def test_spaces_in_path_converted_to_hyphens(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/thomas chippendale",
-            "title": "Thomas Chippendale",
-            "content": "Content.",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/thomas chippendale",
+                "title": "Thomas Chippendale",
+                "content": "Content.",
+            }
+        )
         expected = wiki_dir / "people" / "thomas-chippendale.md"
         assert expected.exists()
 
     def test_uppercase_path_converted_to_lowercase(self, write_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "People/Thomas-Chippendale",
-            "title": "Thomas Chippendale",
-            "content": "Content.",
-        })
+        write_tool.invoke(
+            {
+                "path": "People/Thomas-Chippendale",
+                "title": "Thomas Chippendale",
+                "content": "Content.",
+            }
+        )
         expected = wiki_dir / "people" / "thomas-chippendale.md"
         assert expected.exists()
 
@@ -164,11 +182,13 @@ class TestWriteArticleFile:
         assert "First." not in text
 
     def test_return_value_contains_file_path(self, write_tool, wiki_dir):
-        result = write_tool.invoke({
-            "path": "places/paris",
-            "title": "Paris",
-            "content": "Content.",
-        })
+        result = write_tool.invoke(
+            {
+                "path": "places/paris",
+                "title": "Paris",
+                "content": "Content.",
+            }
+        )
         assert "Article written to:" in result
         assert "paris.md" in result
 
@@ -177,14 +197,17 @@ class TestWriteArticleFile:
 # read_article_file
 # ---------------------------------------------------------------------------
 
+
 class TestReadArticleFile:
     def test_returns_file_contents_with_front_matter(self, write_tool, read_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/read-test",
-            "title": "Read Test",
-            "content": "Article body here.",
-            "description": "A test article.",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/read-test",
+                "title": "Read Test",
+                "content": "Article body here.",
+                "description": "A test article.",
+            }
+        )
         result = read_tool.invoke({"path": "people/read-test"})
         assert "Read Test" in result
         assert "A test article." in result
@@ -195,22 +218,26 @@ class TestReadArticleFile:
         assert "No article file found" in result
 
     def test_path_normalisation_applies_on_read(self, write_tool, read_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "places/new-york",
-            "title": "New York",
-            "content": "The city.",
-        })
+        write_tool.invoke(
+            {
+                "path": "places/new-york",
+                "title": "New York",
+                "content": "The city.",
+            }
+        )
         # Reading with spaces and uppercase should still find the file
         result = read_tool.invoke({"path": "Places/New York"})
         assert "New York" in result
 
     def test_returns_entity_id_in_output(self, write_tool, read_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/e-id-test",
-            "title": "Entity ID Test",
-            "content": "Content.",
-            "entity_id": "abc-entity-123",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/e-id-test",
+                "title": "Entity ID Test",
+                "content": "Content.",
+                "entity_id": "abc-entity-123",
+            }
+        )
         result = read_tool.invoke({"path": "people/e-id-test"})
         assert "abc-entity-123" in result
 
@@ -219,14 +246,17 @@ class TestReadArticleFile:
 # list_article_files
 # ---------------------------------------------------------------------------
 
+
 class TestListArticleFiles:
     def test_lists_all_md_files(self, write_tool, list_tool, wiki_dir):
         for i in range(3):
-            write_tool.invoke({
-                "path": f"test/article-{i}",
-                "title": f"Article {i}",
-                "content": "Content.",
-            })
+            write_tool.invoke(
+                {
+                    "path": f"test/article-{i}",
+                    "title": f"Article {i}",
+                    "content": "Content.",
+                }
+            )
         result = list_tool.invoke({})
         assert "3 article(s)" in result
 
@@ -244,41 +274,50 @@ class TestListArticleFiles:
 # search_article_files
 # ---------------------------------------------------------------------------
 
+
 class TestSearchArticleFiles:
     def test_finds_files_by_body_content(self, write_tool, search_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "people/cabinet-maker",
-            "title": "Cabinet Maker",
-            "content": "Thomas Chippendale was born in 1718 in Otley.",
-        })
+        write_tool.invoke(
+            {
+                "path": "people/cabinet-maker",
+                "title": "Cabinet Maker",
+                "content": "Thomas Chippendale was born in 1718 in Otley.",
+            }
+        )
         result = search_tool.invoke({"query": "Chippendale"})
         assert "cabinet-maker" in result
         assert "Cabinet Maker" in result
 
     def test_finds_files_by_title(self, write_tool, search_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "places/bath",
-            "title": "City of Bath",
-            "content": "Some unrelated content.",
-        })
+        write_tool.invoke(
+            {
+                "path": "places/bath",
+                "title": "City of Bath",
+                "content": "Some unrelated content.",
+            }
+        )
         result = search_tool.invoke({"query": "City of Bath"})
         assert "bath" in result
 
     def test_search_is_case_insensitive(self, write_tool, search_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "objects/walnut",
-            "title": "Walnut Wood",
-            "content": "Walnut was prized by furniture makers.",
-        })
+        write_tool.invoke(
+            {
+                "path": "objects/walnut",
+                "title": "Walnut Wood",
+                "content": "Walnut was prized by furniture makers.",
+            }
+        )
         result = search_tool.invoke({"query": "WALNUT"})
         assert "walnut" in result.lower()
 
     def test_returns_no_match_message_when_not_found(self, write_tool, search_tool, wiki_dir):
-        write_tool.invoke({
-            "path": "test/placeholder",
-            "title": "Placeholder",
-            "content": "Some content here.",
-        })
+        write_tool.invoke(
+            {
+                "path": "test/placeholder",
+                "title": "Placeholder",
+                "content": "Some content here.",
+            }
+        )
         result = search_tool.invoke({"query": "xyznotfoundatall99"})
         assert "No articles found matching" in result
 
@@ -290,6 +329,7 @@ class TestSearchArticleFiles:
 # ---------------------------------------------------------------------------
 # create_file_read_tools – read-only subset
 # ---------------------------------------------------------------------------
+
 
 class TestCreateFileReadTools:
     def test_returns_three_read_only_tools(self, wiki_dir):
@@ -312,6 +352,7 @@ class TestCreateFileReadTools:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 class TestParseFrontMatter:
     def test_parses_yaml_front_matter(self):

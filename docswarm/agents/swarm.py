@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
-
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -102,7 +101,9 @@ class DocSwarm:
         db_tools = create_db_tools(db)
         entity_tools = create_entity_tools(db)
         classification_tools = create_classification_tools(
-            db, model=config.model, ollama_base_url=config.ollama_base_url,
+            db,
+            model=config.model,
+            ollama_base_url=config.ollama_base_url,
         )
         file_tools = create_file_tools(config.wiki_output_dir)
         file_read_tools = create_file_read_tools(config.wiki_output_dir)
@@ -121,21 +122,24 @@ class DocSwarm:
             + _pick(file_read_tools, "search_article_files")
         )
         # Writer: search source material + read existing articles for context (4 tools)
-        writer_tools = (
-            _pick(db_tools, "search_chunks", "get_page_text")
-            + _pick(file_read_tools, "search_article_files", "read_article_file")
+        writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
+            file_read_tools, "search_article_files", "read_article_file"
         )
         # Reviewer: verify claims against source DB (2 tools)
         reviewer_tools = _pick(db_tools, "search_chunks", "get_page_text")
-        # Editor: write article file + mark page studied (2 tools)
+        # Editor: list existing articles + write article file + mark page studied (3 tools)
         editor_tools = (
-            _pick(file_tools, "write_article_file")
+            _pick(file_read_tools, "list_article_files")
+            + _pick(file_tools, "write_article_file")
             + _pick(db_tools, "mark_page_studied")
         )
 
         log.info(
             "Tool counts — researcher:%d writer:%d reviewer:%d editor:%d",
-            len(research_tools), len(writer_tools), len(reviewer_tools), len(editor_tools),
+            len(research_tools),
+            len(writer_tools),
+            len(reviewer_tools),
+            len(editor_tools),
         )
 
         # Build individual ReAct agents
@@ -213,8 +217,7 @@ class DocSwarm:
                 text = msg.content
                 if isinstance(text, list):
                     text = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b)
-                        for b in text
+                        b.get("text", "") if isinstance(b, dict) else str(b) for b in text
                     )
                 if text:
                     preview = text[:500].replace("\n", " ↵ ")
@@ -272,9 +275,7 @@ class DocSwarm:
         """Remove <think>...</think> blocks that some models emit textually."""
         return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    def _route_from_researcher(
-        self, state: SwarmState
-    ) -> str:
+    def _route_from_researcher(self, state: SwarmState) -> str:
         """Skip the rest of the pipeline if the researcher classified the page as an ad.
 
         Checks the last AI message for the "advertisement — skipping" signal.
@@ -285,8 +286,7 @@ class DocSwarm:
                 content = msg.content
                 if isinstance(content, list):
                     content = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b)
-                        for b in content
+                        b.get("text", "") if isinstance(b, dict) else str(b) for b in content
                     )
                 content = self._strip_think_tags(str(content)).lower()
                 if "advertisement" in content and "skipping" in content:
@@ -295,9 +295,7 @@ class DocSwarm:
                 break
         return "writer"
 
-    def _route_from_reviewer(
-        self, state: SwarmState
-    ) -> Literal["editor", "writer"]:
+    def _route_from_reviewer(self, state: SwarmState) -> Literal["editor", "writer"]:
         """Decide whether to send a reviewed article to the editor or back to the writer.
 
         The reviewer's last message is inspected for keywords indicating that
@@ -378,7 +376,9 @@ class DocSwarm:
             "active_agent": "researcher",
         }
         result = self._graph.invoke(initial_state)
-        log.info("Swarm complete for topic: %s (%d messages)", topic, len(result.get("messages", [])))
+        log.info(
+            "Swarm complete for topic: %s (%d messages)", topic, len(result.get("messages", []))
+        )
         return result
 
     def run_for_page(self, page: dict) -> dict:
@@ -480,14 +480,13 @@ class DocSwarm:
                 c = msg.content if isinstance(msg.content, str) else ""
                 if isinstance(msg.content, list):
                     c = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b)
-                        for b in msg.content
+                        b.get("text", "") if isinstance(b, dict) else str(b) for b in msg.content
                     )
                 all_ai_text += c + "\n"
 
         # Parse === ARTICLE: name === ... === END ARTICLE === blocks
         article_pattern = re.compile(
-            r'===\s*ARTICLE:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ARTICLE\s*===',
+            r"===\s*ARTICLE:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ARTICLE\s*===",
             re.DOTALL | re.IGNORECASE,
         )
         for match in article_pattern.finditer(all_ai_text):
@@ -508,8 +507,26 @@ class DocSwarm:
             entity_type = entity.get("entity_type", "misc")
             context = entity.get("context_text", "")
 
-            # Build the file path: entity-type/entity-name
-            safe_type = re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-") or "misc"
+            # Canonicalise entity type to avoid folder duplication
+            _CANONICAL_TYPES = {
+                "people": "person",
+                "persons": "person",
+                "organisations": "organisation",
+                "orgs": "organisation",
+                "org": "organisation",
+                "company": "organisation",
+                "places": "place",
+                "location": "place",
+                "locations": "place",
+                "events": "event",
+                "objects": "object",
+                "thing": "object",
+                "things": "object",
+                "concepts": "concept",
+                "idea": "concept",
+            }
+            raw_type = re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-") or "misc"
+            safe_type = _CANONICAL_TYPES.get(raw_type, raw_type)
             safe_name = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
             if not safe_name:
                 log.warning("Entity name %r has no alphanumeric chars — skipping", name)
@@ -526,10 +543,10 @@ class DocSwarm:
             body = article_bodies.get(name.lower(), "")
             if not body:
                 # Build a stub article from entity context
-                body = f"**{name}** is a {entity_type}.\n"
+                body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
                 if context:
-                    body += f"\n{context}\n"
-                body += f"\n[Source: \"{doc_title}\", p.{page_number}]\n"
+                    body += f"\n{context}<sup>[1]</sup>\n"
+                body += f'\n## References\n\n1. "{doc_title}", p.{page_number}\n'
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
             meta = {

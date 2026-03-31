@@ -225,7 +225,7 @@ class TextChunker:
                 # Align to word boundary
                 space_idx = tail.find(" ")
                 if space_idx != -1:
-                    tail = tail[space_idx + 1:]
+                    tail = tail[space_idx + 1 :]
             else:
                 tail = prev
 

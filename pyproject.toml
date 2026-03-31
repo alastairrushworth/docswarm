@@ -26,3 +26,13 @@ packages = ["docswarm"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

@@ -156,7 +156,9 @@ def create_file_tools(wiki_output_dir: str) -> list:
             text = f.read_text(encoding="utf-8")
             meta, _ = _parse_front_matter(text)
             rel = f.relative_to(root).with_suffix("")
-            synced = f"wiki_page_id={meta['wiki_page_id']}" if meta.get("wiki_page_id") else "not synced"
+            synced = (
+                f"wiki_page_id={meta['wiki_page_id']}" if meta.get("wiki_page_id") else "not synced"
+            )
             lines.append(f"{rel}  |  {meta.get('title', '(no title)')}  |  {synced}")
         return "\n".join(lines)
 
@@ -187,7 +189,7 @@ def create_file_tools(wiki_output_dir: str) -> list:
                 # Find a short excerpt (adjust index for title prefix)
                 idx = searchable.find(query_lower)
                 body_idx = max(0, idx - len(title_prefix))
-                excerpt = body[max(0, body_idx - 60): body_idx + 120].replace("\n", " ").strip()
+                excerpt = body[max(0, body_idx - 60) : body_idx + 120].replace("\n", " ").strip()
                 matches.append((rel, meta.get("title", "?"), excerpt))
 
         if not matches:

@@ -24,31 +24,38 @@ def tools_by_name(entity_tools):
 # save_entity
 # ---------------------------------------------------------------------------
 
+
 class TestSaveEntityTool:
     def test_creates_new_entity_on_first_call(self, tools_by_name, sample_page, db):
-        result = tools_by_name["save_entity"].invoke({
-            "name": "Thomas Chippendale",
-            "entity_type": "person",
-            "page_id": sample_page["id"],
-            "context_text": "Famous English cabinet-maker.",
-        })
+        result = tools_by_name["save_entity"].invoke(
+            {
+                "name": "Thomas Chippendale",
+                "entity_type": "person",
+                "page_id": sample_page["id"],
+                "context_text": "Famous English cabinet-maker.",
+            }
+        )
         assert "NEW entity created" in result
         entity = db.get_entity_by_name("Thomas Chippendale")
         assert entity is not None
 
     def test_reuses_existing_entity_on_second_call(self, tools_by_name, sample_page, db):
         # First call creates the entity
-        tools_by_name["save_entity"].invoke({
-            "name": "Windsor Castle",
-            "entity_type": "place",
-            "page_id": sample_page["id"],
-        })
+        tools_by_name["save_entity"].invoke(
+            {
+                "name": "Windsor Castle",
+                "entity_type": "place",
+                "page_id": sample_page["id"],
+            }
+        )
         # Second call with same name should reuse
-        result = tools_by_name["save_entity"].invoke({
-            "name": "Windsor Castle",
-            "entity_type": "place",
-            "page_id": sample_page["id"],
-        })
+        result = tools_by_name["save_entity"].invoke(
+            {
+                "name": "Windsor Castle",
+                "entity_type": "place",
+                "page_id": sample_page["id"],
+            }
+        )
         assert "EXISTING entity" in result
 
         # Should still be only one entity row
@@ -72,19 +79,23 @@ class TestSaveEntityTool:
         assert len(mentions) == 2
 
     def test_result_contains_entity_id(self, tools_by_name, sample_page):
-        result = tools_by_name["save_entity"].invoke({
-            "name": "Mahogany",
-            "entity_type": "object",
-            "page_id": sample_page["id"],
-        })
+        result = tools_by_name["save_entity"].invoke(
+            {
+                "name": "Mahogany",
+                "entity_type": "object",
+                "page_id": sample_page["id"],
+            }
+        )
         assert "Entity ID:" in result
 
     def test_result_contains_name_and_type(self, tools_by_name, sample_page):
-        result = tools_by_name["save_entity"].invoke({
-            "name": "London",
-            "entity_type": "place",
-            "page_id": sample_page["id"],
-        })
+        result = tools_by_name["save_entity"].invoke(
+            {
+                "name": "London",
+                "entity_type": "place",
+                "page_id": sample_page["id"],
+            }
+        )
         assert "London" in result
         assert "place" in result
 
@@ -92,6 +103,7 @@ class TestSaveEntityTool:
 # ---------------------------------------------------------------------------
 # search_entities
 # ---------------------------------------------------------------------------
+
 
 class TestSearchEntitiesTool:
     def test_finds_entity_by_partial_name(self, tools_by_name, sample_page, db):
@@ -120,6 +132,7 @@ class TestSearchEntitiesTool:
 # ---------------------------------------------------------------------------
 # get_entities_for_page
 # ---------------------------------------------------------------------------
+
 
 class TestGetEntitiesForPageTool:
     def test_returns_entities_for_page(self, tools_by_name, sample_page, sample_document, db):
@@ -152,16 +165,22 @@ class TestGetEntitiesForPageTool:
 # get_entity_mentions
 # ---------------------------------------------------------------------------
 
+
 class TestGetEntityMentionsTool:
     def test_returns_all_mentions(self, tools_by_name, sample_page, sample_document, db):
         # Add second page
-        page2_id = db.insert_page({
-            "document_id": sample_document["id"],
-            "page_number": 2,
-            "width_pts": 595.0, "height_pts": 842.0,
-            "image_path": "/tmp/p2.png", "raw_text": "Second page.",
-            "ocr_confidence": 90.0, "word_count": 2,
-        })
+        page2_id = db.insert_page(
+            {
+                "document_id": sample_document["id"],
+                "page_number": 2,
+                "width_pts": 595.0,
+                "height_pts": 842.0,
+                "image_path": "/tmp/p2.png",
+                "raw_text": "Second page.",
+                "ocr_confidence": 90.0,
+                "word_count": 2,
+            }
+        )
         eid = db.upsert_entity("Roving Concept", "concept")
         db.add_entity_mention(eid, sample_page["id"], sample_document["id"], "Mention 1")
         db.add_entity_mention(eid, page2_id, sample_document["id"], "Mention 2")
@@ -172,9 +191,9 @@ class TestGetEntityMentionsTool:
         assert "2 mention(s)" in result
 
     def test_returns_no_mentions_message_when_empty(self, tools_by_name, db):
-        result = tools_by_name["get_entity_mentions"].invoke({
-            "entity_id": "00000000-0000-0000-0000-000000000000"
-        })
+        result = tools_by_name["get_entity_mentions"].invoke(
+            {"entity_id": "00000000-0000-0000-0000-000000000000"}
+        )
         assert "No mentions found" in result
 
     def test_result_includes_document_title(self, tools_by_name, sample_page, sample_document, db):
@@ -188,6 +207,7 @@ class TestGetEntityMentionsTool:
 # Tool list completeness
 # ---------------------------------------------------------------------------
 
+
 class TestEntityToolsCreation:
     def test_creates_four_tools(self, db):
         tools = create_entity_tools(db)
@@ -197,7 +217,9 @@ class TestEntityToolsCreation:
         tools = create_entity_tools(db)
         names = {t.name for t in tools}
         expected = {
-            "save_entity", "search_entities",
-            "get_entities_for_page", "get_entity_mentions",
+            "save_entity",
+            "search_entities",
+            "get_entities_for_page",
+            "get_entity_mentions",
         }
         assert names == expected
