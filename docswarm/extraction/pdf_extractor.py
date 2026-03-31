@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 import fitz  # PyMuPDF
 import pytesseract
-from PIL import Image, ImageEnhance
+from PIL import Image
+from PIL import ImageEnhance
 from pytesseract import Output
 
 from docswarm.logger import get_logger

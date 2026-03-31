@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
-from unittest.mock import MagicMock, patch
+from typing import Any
+from typing import List
+from typing import Optional
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
+from langchain_core.outputs import ChatGeneration
+from langchain_core.outputs import ChatResult
 
 from docswarm.agents.swarm import DocSwarm
 from docswarm.agents.tools.db_tools import create_db_tools

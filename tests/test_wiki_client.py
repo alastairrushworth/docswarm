@@ -5,7 +5,8 @@ All HTTP calls are mocked via unittest.mock so no real Wiki.js instance is neede
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
