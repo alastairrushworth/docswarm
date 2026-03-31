@@ -136,13 +136,14 @@ class DocSwarm:
             + _pick(db_tools, "mark_page_studied")
         )
 
-        log.info(
-            "Tool counts — researcher:%d writer:%d reviewer:%d editor:%d",
-            len(research_tools),
-            len(writer_tools),
-            len(reviewer_tools),
-            len(editor_tools),
-        )
+        for agent_name, tools in [
+            ("researcher", research_tools),
+            ("writer", writer_tools),
+            ("reviewer", reviewer_tools),
+            ("editor", editor_tools),
+        ]:
+            names = [t.name for t in tools]
+            log.info("  %s (%d tools): %s", agent_name, len(names), ", ".join(names))
 
         # Build individual ReAct agents
         self._researcher = create_react_agent(
@@ -277,12 +278,9 @@ class DocSwarm:
         """Remove <think>...</think> blocks that some models emit textually."""
         return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    def _route_from_researcher(self, state: SwarmState) -> str:
-        """Skip the rest of the pipeline if the researcher classified the page as an ad.
-
-        Checks the last AI message for the "advertisement — skipping" signal.
-        """
-        messages = state.get("messages", [])
+    @staticmethod
+    def _is_ad_skip(messages: list) -> bool:
+        """Return True if the last AI message signals an advertisement skip."""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 content = msg.content
@@ -290,11 +288,16 @@ class DocSwarm:
                     content = " ".join(
                         b.get("text", "") if isinstance(b, dict) else str(b) for b in content
                     )
-                content = self._strip_think_tags(str(content)).lower()
-                if "advertisement" in content and "skipping" in content:
-                    log.info("Researcher flagged page as advertisement — skipping pipeline")
-                    return END
-                break
+                content = DocSwarm._strip_think_tags(str(content)).lower()
+                return "advertisement" in content and "skipping" in content
+        return False
+
+    def _route_from_researcher(self, state: SwarmState) -> str:
+        """Skip the rest of the pipeline if the researcher classified the page as an ad."""
+        messages = state.get("messages", [])
+        if self._is_ad_skip(messages):
+            log.info("Researcher flagged page as advertisement — skipping pipeline")
+            return END
         return "writer"
 
     def _route_from_reviewer(self, state: SwarmState) -> Literal["editor", "writer"]:
@@ -428,14 +431,15 @@ class DocSwarm:
         log.info("Swarm complete for page_id=%s (%d messages)", page_id, len(messages))
 
         # Always mark the page as studied — do not rely on the LLM to call the tool.
-        # Also attempt to salvage any article content the writer produced if the
-        # editor failed to call write_article_file.
-        article_path = self._salvage_articles(
-            messages=messages,
-            page_id=page_id,
-            doc_title=doc_title,
-            page_number=page_number,
-        )
+        # Skip salvage entirely if the researcher flagged the page as an ad.
+        article_path = ""
+        if not self._is_ad_skip(messages):
+            article_path = self._salvage_articles(
+                messages=messages,
+                page_id=page_id,
+                doc_title=doc_title,
+                page_number=page_number,
+            )
         self.db.log_page_study(
             page_id=page_id,
             document_id=page["document_id"],

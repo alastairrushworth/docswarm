@@ -39,3 +39,4 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 force-single-line = true
+known-first-party = ["docswarm"]
