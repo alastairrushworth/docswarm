@@ -12,7 +12,10 @@ Your job:
 1. FIRST, call classify_page_content(page_id) to check whether this page is an advertisement.
    - If the classification is 'advertisement', STOP immediately. Do not extract any entities. Just say "Page is an advertisement — skipping."
    - If 'editorial' or 'mixed', continue with the steps below.
-2. Read the page text and identify every notable entity: people, places, events, objects, organisations, concepts.
+2. Read the page text and identify notable entities: people, places, events, objects, organisations, concepts.
+   - Only extract entities that are SUBJECTS of editorial discussion.
+   - Do NOT extract: magazine staff listed in mastheads or credits (editors, ad managers, photographers, typesetters, printers) unless the page discusses them as a subject in editorial content.
+   - Do NOT extract generic terms (e.g. "cycling", "sport") — only specific named entities.
 3. For each entity, call save_entity(name, entity_type, page_id, context_text).
    - entity_type MUST be one of: {ENTITY_TYPES}
    - Use a short context_text (1-2 sentences) quoting the key facts about that entity from the page.
@@ -36,31 +39,23 @@ Rules:
 - If you only have a single mention with minimal info, write a short stub (1-2 sentences is fine).
 - Do NOT write articles for entities whose only source material is advertising or promotional copy (e.g. product ads, classifieds, slogans). If an entity only appears in ad content, skip it entirely. Longer editorial or informational articles about a brand or product are fine.
 
-Separate each article with a line: === ARTICLE: {entity name} ===
-End each article with: === END ARTICLE ==="""
+IMPORTANT — you MUST wrap each article using EXACTLY this format:
 
-REVIEWER_PROMPT = """You are a fact-checker for wiki articles.
-Check each article against the source material using search_chunks.
-Verify that:
-1. Facts are accurate.
-2. Every factual claim has an inline citation (<sup>[N]</sup>) and a matching entry in the ## References section.
-3. References use the format: N. "Document Title", p.PageNumber
-If an article contains agent instructions, entity IDs, or "NEEDED" labels instead of factual content, request a rewrite.
-If an article is derived solely from advertising or promotional content (product ads, classifieds, marketing copy) rather than editorial or informational material, request that it be dropped — do not approve ad-derived articles.
-Approve or request revision."""
+=== ARTICLE: Entity Name ===
+(article body here)
+=== END ARTICLE ===
 
-EDITOR_PROMPT = f"""You are the wiki editor. You receive reviewed articles.
+Example output:
 
-BEFORE writing any file, call list_article_files to see existing articles and their folder structure.
+=== ARTICLE: Reg Harris ===
+**Reg Harris** was a British track cycling champion.<sup>[1]</sup>
 
-For EACH article, call write_article_file with:
-- path: entity-type/entity-name (lowercase, hyphens).
-  entity-type MUST be one of: {ENTITY_TYPES}
-  Examples: organisation/weinmann, person/reg-harris, event/tour-de-france
-- title: the entity name
-- content: the article body (plain markdown, no metadata). Must include inline <sup>[N]</sup> citations and a ## References section.
-- source_page_id: the page_id from the original task
+## Key facts
+He won multiple world sprint titles during the late 1940s and 1950s.<sup>[1]</sup>
 
-If an article for this entity already exists in the file listing, use the SAME path to update it rather than creating a duplicate.
+## References
+1. "Cycling Weekly Vol.12", p.3
+=== END ARTICLE ===
 
-Call write_article_file once per entity. Do not skip any."""
+Do NOT skip the === delimiters. Every article MUST start with === ARTICLE: and end with === END ARTICLE ===."""
+

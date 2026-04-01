@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
-from typing import Literal
 
 from langchain_core.messages import AIMessage
 from langchain_core.messages import HumanMessage
@@ -17,15 +16,12 @@ from langgraph.graph import MessagesState
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import create_react_agent
 
-from docswarm.agents.personas import EDITOR_PROMPT
 from docswarm.agents.personas import RESEARCHER_PROMPT
-from docswarm.agents.personas import REVIEWER_PROMPT
 from docswarm.agents.personas import WRITER_PROMPT
 from docswarm.agents.tools.db_tools import create_db_tools
 from docswarm.agents.tools.entity_tools import create_entity_tools
 from docswarm.agents.tools.file_tools import _build_front_matter
 from docswarm.agents.tools.file_tools import create_file_read_tools
-from docswarm.agents.tools.file_tools import create_file_tools
 from docswarm.agents.tools.pdf_tools import create_classification_tools
 from docswarm.logger import get_logger
 
@@ -36,6 +32,194 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Canonical mapping for entity type folder names.
+_CANONICAL_TYPES = {
+    "people": "person",
+    "persons": "person",
+    "organisations": "organisation",
+    "orgs": "organisation",
+    "org": "organisation",
+    "company": "organisation",
+    "places": "place",
+    "location": "place",
+    "locations": "place",
+    "events": "event",
+    "objects": "object",
+    "thing": "object",
+    "things": "object",
+    "concepts": "concept",
+    "idea": "concept",
+}
+
+# Masthead / credits role words — entities whose context is dominated by these
+# are likely staff credits rather than editorial subjects.
+_MASTHEAD_ROLES = {
+    "manager",
+    "director",
+    "editor",
+    "department",
+    "secretary",
+    "photographer",
+    "printer",
+    "typesetter",
+    "publisher",
+    "correspondent",
+    "photographic",
+}
+
+# Article block regex used by both the deterministic editor and salvage.
+_ARTICLE_PATTERN = re.compile(
+    r"===\s*ARTICLE:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ARTICLE\s*===",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalize(s: str) -> str:
+    """Lowercase, strip non-alphanumeric characters for fuzzy matching."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _safe_type(entity_type: str) -> str:
+    """Canonicalise an entity type string to a folder name."""
+    raw = re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-") or "misc"
+    return _CANONICAL_TYPES.get(raw, raw)
+
+
+def _safe_name(name: str) -> str:
+    """Slugify an entity name for use as a filename."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def _is_masthead_entity(entity: dict) -> bool:
+    """Return True if an entity looks like a masthead credit, not an editorial subject."""
+    context = (entity.get("context_text") or "").lower()
+    if len(context.split()) > 20:
+        return False  # substantial context — probably editorial
+    return bool(_MASTHEAD_ROLES & set(context.split()))
+
+
+def _get_page_classification(messages: list) -> str:
+    """Extract the page classification from the classify_page_content tool result.
+
+    Returns one of: "advertisement", "editorial", "mixed", or "unknown".
+    """
+    for msg in messages:
+        if isinstance(msg, ToolMessage) and msg.name == "classify_page_content":
+            content = str(msg.content).lower()
+            if "classification:" in content:
+                after = content.split("classification:", 1)[1].strip()
+                for label in ("advertisement", "editorial", "mixed"):
+                    if after.startswith(label):
+                        return label
+    return "unknown"
+
+
+def _collect_ai_text(messages: list) -> str:
+    """Concatenate all AIMessage content into a single string."""
+    parts = []
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            c = msg.content if isinstance(msg.content, str) else ""
+            if isinstance(msg.content, list):
+                c = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in msg.content
+                )
+            if c:
+                parts.append(c)
+    return "\n".join(parts)
+
+
+# Fallback pattern: markdown heading like "# Entity Name" or "## Entity Name"
+# followed by body text until the next top-level heading or end of text.
+_MD_HEADING_PATTERN = re.compile(
+    r"^#{1,2}\s+(?:\d+\.\s+)?(.+?)$\n(.*?)(?=^#{1,2}\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+# Headings to skip when using fallback parsing
+_SKIP_HEADINGS = {
+    "references", "key facts", "summary", "entities identified",
+    "entities", "notes", "sources", "introduction", "overview",
+    "page analysis", "page summary", "article status",
+    "new articles created", "existing articles", "entities needing articles",
+}
+
+# Regex patterns in headings that indicate meta-content, not real articles
+_META_HEADING_RE = re.compile(
+    r"entit(?:y|ies)|summary|page\s*\d|page\s*analysis|article\s*status|"
+    r"supporting\s*material|new\s*article|existing\s*article",
+    re.IGNORECASE,
+)
+
+
+def _extract_article_blocks(messages: list) -> dict[str, tuple[str, str]]:
+    """Parse === ARTICLE: name === blocks from all AI messages.
+
+    Falls back to markdown heading parsing if no delimited blocks are found.
+
+    Returns:
+        Dict mapping normalized name → (original_title, body).
+    """
+    all_ai_text = _collect_ai_text(messages)
+
+    # Primary: look for explicit delimiters
+    blocks: dict[str, tuple[str, str]] = {}
+    for match in _ARTICLE_PATTERN.finditer(all_ai_text):
+        title = match.group(1).strip()
+        body = match.group(2).strip()
+        if body and "ARTICLE NEEDED" not in body and "entity_id" not in body.lower():
+            blocks[_normalize(title)] = (title, body)
+
+    if blocks:
+        return blocks
+
+    # Fallback: parse markdown headings as article boundaries
+    for match in _MD_HEADING_PATTERN.finditer(all_ai_text):
+        title = match.group(1).strip().strip("*").strip()
+        body = match.group(2).strip()
+        if not body or len(body) < 20:
+            continue
+        if _normalize(title) in _SKIP_HEADINGS:
+            continue
+        if _META_HEADING_RE.search(title):
+            continue
+        if "ARTICLE NEEDED" in body or "entity_id" in body.lower():
+            continue
+        blocks[_normalize(title)] = (title, body)
+
+    if blocks:
+        log.info("No delimited blocks found; extracted %d from markdown headings", len(blocks))
+
+    return blocks
+
+
+def _match_entity_to_article(
+    entity_name: str, article_blocks: dict[str, tuple[str, str]]
+) -> tuple[str, str] | None:
+    """Find the best matching article block for an entity name.
+
+    Tries exact normalized match, then substring containment.
+    Returns (title, body) or None.
+    """
+    norm = _normalize(entity_name)
+    # Exact match
+    if norm in article_blocks:
+        return article_blocks[norm]
+    # Entity name is a substring of an article title
+    for key, val in article_blocks.items():
+        if norm in key or key in norm:
+            return val
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Swarm state
@@ -43,12 +227,7 @@ log = get_logger(__name__)
 
 
 class SwarmState(MessagesState):
-    """State shared across all nodes in the swarm graph.
-
-    Extends :class:`langgraph.graph.MessagesState` (which provides a
-    ``messages`` field) with ``active_agent`` to track which persona is
-    currently acting.
-    """
+    """State shared across all nodes in the swarm graph."""
 
     active_agent: str
 
@@ -59,19 +238,11 @@ class SwarmState(MessagesState):
 
 
 class DocSwarm:
-    """Orchestrates a four-agent LangGraph swarm for wiki generation.
+    """Orchestrates a three-stage pipeline for wiki generation.
 
-    The swarm consists of:
-
-    * **Researcher** – searches the source document database and collects
-      relevant passages with references.
-    * **Writer** – drafts a wiki article from the research findings.
-    * **Reviewer** – fact-checks the draft against the source material.
-    * **Editor** – applies final formatting and publishes to Wiki.js.
-
-    The routing logic is linear by default (researcher → writer → reviewer →
-    editor) with the reviewer able to send the article back to the writer for
-    revision.
+    * **Researcher** (LLM) – classifies, extracts entities, searches.
+    * **Writer** (LLM) – drafts wiki articles from research.
+    * **Editor** (deterministic Python) – parses writer output, writes files.
     """
 
     def __init__(
@@ -80,14 +251,6 @@ class DocSwarm:
         db: "DatabaseManager",
         wiki_client: "WikiJSClient",
     ) -> None:
-        """Initialise the swarm.
-
-        Args:
-            config: Application configuration (used for model name and API
-                key).
-            db: Open database manager.
-            wiki_client: Authenticated Wiki.js client.
-        """
         self.config = config
         self.db = db
         self.wiki_client = wiki_client
@@ -107,45 +270,30 @@ class DocSwarm:
             model=config.model,
             ollama_base_url=config.ollama_base_url,
         )
-        file_tools = create_file_tools(config.wiki_output_dir)
         file_read_tools = create_file_read_tools(config.wiki_output_dir)
 
         def _pick(tools: list, *names: str) -> list:
-            """Return only the tools whose .name is in *names."""
             name_set = set(names)
             return [t for t in tools if t.name in name_set]
 
-        # Keep per-agent tool counts small — small models (qwen3.5:4b) crash with >8-10 tools.
-        # Researcher: classify + search + entity extraction + check existing articles (8 tools)
         research_tools = (
             classification_tools
             + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
             + _pick(entity_tools, "save_entity", "search_entities", "get_entities_for_page")
             + _pick(file_read_tools, "search_article_files")
         )
-        # Writer: search source material + read existing articles for context (4 tools)
         writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
             file_read_tools, "search_article_files", "read_article_file"
-        )
-        # Reviewer: verify claims against source DB (2 tools)
-        reviewer_tools = _pick(db_tools, "search_chunks", "get_page_text")
-        # Editor: list existing articles + write article file + mark page studied (3 tools)
-        editor_tools = (
-            _pick(file_read_tools, "list_article_files")
-            + _pick(file_tools, "write_article_file")
-            + _pick(db_tools, "mark_page_studied")
         )
 
         for agent_name, tools in [
             ("researcher", research_tools),
             ("writer", writer_tools),
-            ("reviewer", reviewer_tools),
-            ("editor", editor_tools),
         ]:
             names = [t.name for t in tools]
             log.info("  %s (%d tools): %s", agent_name, len(names), ", ".join(names))
+        log.info("  editor (deterministic, no LLM)")
 
-        # Build individual ReAct agents
         self._researcher = create_react_agent(
             self._llm,
             tools=research_tools,
@@ -156,16 +304,6 @@ class DocSwarm:
             tools=writer_tools,
             prompt=WRITER_PROMPT,
         )
-        self._reviewer = create_react_agent(
-            self._llm,
-            tools=reviewer_tools,
-            prompt=REVIEWER_PROMPT,
-        )
-        self._editor = create_react_agent(
-            self._llm,
-            tools=editor_tools,
-            prompt=EDITOR_PROMPT,
-        )
 
         self._graph = self.build_graph()
 
@@ -174,35 +312,18 @@ class DocSwarm:
     # ------------------------------------------------------------------
 
     def build_graph(self) -> StateGraph:
-        """Construct and compile the LangGraph StateGraph.
-
-        The graph nodes correspond to the four agents.  Routing is determined
-        by the ``active_agent`` field in :class:`SwarmState`.
-
-        Returns:
-            A compiled LangGraph runnable.
-        """
         builder = StateGraph(SwarmState)
-
-        # Register nodes (each node calls the corresponding ReAct agent)
         builder.add_node("researcher", self._run_researcher)
         builder.add_node("writer", self._run_writer)
-        builder.add_node("reviewer", self._run_reviewer)
         builder.add_node("editor", self._run_editor)
 
-        # Edges
         builder.add_edge(START, "researcher")
         builder.add_conditional_edges(
             "researcher",
             self._route_from_researcher,
             {"writer": "writer", END: END},
         )
-        builder.add_edge("writer", "reviewer")
-        builder.add_conditional_edges(
-            "reviewer",
-            self._route_from_reviewer,
-            {"editor": "editor", "writer": "writer"},
-        )
+        builder.add_edge("writer", "editor")
         builder.add_edge("editor", END)
 
         return builder.compile()
@@ -213,10 +334,8 @@ class DocSwarm:
 
     @staticmethod
     def _log_new_messages(agent_name: str, old_count: int, messages: list) -> None:
-        """Log new messages produced by an agent invocation."""
         for msg in messages[old_count:]:
             if isinstance(msg, AIMessage):
-                # Log text content
                 text = msg.content
                 if isinstance(text, list):
                     text = " ".join(
@@ -225,7 +344,6 @@ class DocSwarm:
                 if text:
                     preview = text[:500].replace("\n", " ↵ ")
                     log.debug("[%s] LLM → %s", agent_name, preview)
-                # Log tool calls
                 for tc in getattr(msg, "tool_calls", []) or []:
                     log.debug(
                         "[%s] TOOL CALL → %s(%s)",
@@ -253,21 +371,142 @@ class DocSwarm:
         log.info("[writer] done (%d messages)", len(result["messages"]))
         return {"messages": result["messages"], "active_agent": "writer"}
 
-    def _run_reviewer(self, state: SwarmState) -> dict:
-        log.info("[reviewer] starting")
-        old_count = len(state["messages"])
-        result = self._reviewer.invoke({"messages": state["messages"]})
-        self._log_new_messages("reviewer", old_count, result["messages"])
-        log.info("[reviewer] done (%d messages)", len(result["messages"]))
-        return {"messages": result["messages"], "active_agent": "reviewer"}
-
     def _run_editor(self, state: SwarmState) -> dict:
+        """Deterministic editor: parse writer output and write article files.
+
+        No LLM call — this is pure Python.
+        """
         log.info("[editor] starting")
-        old_count = len(state["messages"])
-        result = self._editor.invoke({"messages": state["messages"]})
-        self._log_new_messages("editor", old_count, result["messages"])
-        log.info("[editor] done (%d messages)", len(result["messages"]))
-        return {"messages": result["messages"], "active_agent": "editor"}
+        messages = state["messages"]
+
+        # Extract page_id from the initial human message
+        page_id = ""
+        doc_title = ""
+        page_number = "?"
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                content = str(msg.content)
+                m = re.search(r"Page ID:\s*(\S+)", content)
+                if m:
+                    page_id = m.group(1)
+                m = re.search(r"Document:\s*(.+)", content)
+                if m:
+                    doc_title = m.group(1).strip()
+                m = re.search(r"Page:\s*(\S+)", content)
+                if m:
+                    page_number = m.group(1)
+                break
+
+        # Parse article blocks from writer output
+        article_blocks = _extract_article_blocks(messages)
+        log.info("[editor] found %d article block(s) from writer", len(article_blocks))
+        if not article_blocks:
+            # Log raw writer text for debugging
+            for msg in reversed(messages):
+                if isinstance(msg, AIMessage):
+                    raw = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    log.debug("[editor] last writer AI text: %s", raw[:800].replace("\n", " ↵ "))
+                    break
+
+        # Get entities for this page
+        entities = self.db.get_entities_for_page(page_id) if page_id else []
+
+        # Filter out masthead entities
+        filtered = [e for e in entities if not _is_masthead_entity(e)]
+        if len(filtered) < len(entities):
+            log.info(
+                "[editor] filtered %d masthead entit(ies)", len(entities) - len(filtered)
+            )
+
+        root = Path(self.config.wiki_output_dir)
+        written_paths = []
+        matched_blocks = set()  # track which article blocks we've used
+
+        # Phase 1: Write articles for entities that have matching writer output
+        for entity in filtered:
+            name = entity.get("name", "")
+            entity_type = entity.get("entity_type", "misc")
+            context = entity.get("context_text", "")
+            slug = _safe_name(name)
+            if not slug:
+                continue
+
+            etype = _safe_type(entity_type)
+            path = f"{etype}/{slug}"
+            file_path = root / (path + ".md")
+
+            if file_path.exists():
+                log.debug("[editor] article already exists: %s", file_path)
+                continue
+
+            # Try to match with writer's article blocks
+            match = _match_entity_to_article(name, article_blocks)
+            if match:
+                title, body = match
+                matched_blocks.add(_normalize(title))
+            else:
+                # Stub from entity context
+                body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
+                if context:
+                    body += f"\n{context}<sup>[1]</sup>\n"
+                body += f'\n## References\n\n1. "{doc_title}", p.{page_number}\n'
+
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "title": name,
+                "description": f"{name} — {entity_type}",
+                "entity_id": entity.get("id", ""),
+                "entity_type": entity_type,
+                "source_page_id": page_id,
+                "wiki_page_id": None,
+            }
+            file_path.write_text(_build_front_matter(meta) + body, encoding="utf-8")
+            log.info("[editor] wrote article → %s", file_path)
+            written_paths.append(str(file_path))
+
+        # Phase 2: Write any unmatched article blocks (writer produced content
+        # for entities the researcher didn't save — still valuable)
+        for norm_key, (title, body) in article_blocks.items():
+            if norm_key in matched_blocks:
+                continue
+            slug = _safe_name(title)
+            if not slug:
+                continue
+            if _META_HEADING_RE.search(title):
+                log.debug("[editor] skipping meta-content block: %s", title)
+                continue
+            # Infer type from content or default to "misc"
+            etype = "misc"
+            for label in ("person", "organisation", "place", "event", "object", "concept"):
+                if label in body.lower()[:200]:
+                    etype = label
+                    break
+            path = f"{etype}/{slug}"
+            file_path = root / (path + ".md")
+            if file_path.exists():
+                continue
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            meta = {
+                "title": title,
+                "description": title,
+                "entity_id": "",
+                "entity_type": etype,
+                "source_page_id": page_id,
+                "wiki_page_id": None,
+            }
+            file_path.write_text(_build_front_matter(meta) + body, encoding="utf-8")
+            log.info("[editor] wrote unmatched article → %s", file_path)
+            written_paths.append(str(file_path))
+
+        summary = (
+            f"Article written to: {', '.join(written_paths)}"
+            if written_paths
+            else "No articles written."
+        )
+        log.info("[editor] done — wrote %d article(s)", len(written_paths))
+
+        new_messages = list(messages) + [AIMessage(content=summary)]
+        return {"messages": new_messages, "active_agent": "editor"}
 
     # ------------------------------------------------------------------
     # Routing
@@ -278,96 +517,25 @@ class DocSwarm:
         """Remove <think>...</think> blocks that some models emit textually."""
         return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    @staticmethod
-    def _is_ad_skip(messages: list) -> bool:
-        """Return True if the last AI message signals an advertisement skip."""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage):
-                content = msg.content
-                if isinstance(content, list):
-                    content = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b) for b in content
-                    )
-                content = DocSwarm._strip_think_tags(str(content)).lower()
-                return "advertisement" in content and "skipping" in content
-        return False
-
     def _route_from_researcher(self, state: SwarmState) -> str:
-        """Skip the rest of the pipeline if the researcher classified the page as an ad."""
-        messages = state.get("messages", [])
-        if self._is_ad_skip(messages):
-            log.info("Researcher flagged page as advertisement — skipping pipeline")
-            return END
-        return "writer"
+        """Skip the pipeline only for pages classified as 'advertisement'.
 
-    def _route_from_reviewer(self, state: SwarmState) -> Literal["editor", "writer"]:
-        """Decide whether to send a reviewed article to the editor or back to the writer.
-
-        The reviewer's last message is inspected for keywords indicating that
-        revision is needed.  If no such keywords are found the article is
-        forwarded to the editor.
-
-        Args:
-            state: Current swarm state.
-
-        Returns:
-            ``"editor"`` or ``"writer"``.
+        Uses the classify_page_content tool result directly, not the LLM's
+        prose interpretation, to avoid false positives on mixed pages.
         """
         messages = state.get("messages", [])
-        last_ai_content = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage):
-                content = msg.content
-                if isinstance(content, list):
-                    # Handle multi-part content blocks
-                    texts = [
-                        block.get("text", "") if isinstance(block, dict) else str(block)
-                        for block in content
-                    ]
-                    last_ai_content = " ".join(texts)
-                else:
-                    last_ai_content = str(content)
-                last_ai_content = self._strip_think_tags(last_ai_content)
-                break
-
-        revision_patterns = [
-            r"revision needed",
-            r"needs revision",
-            r"\brevise\b",
-            r"\brewrite\b",
-            r"return to writer",
-            r"back to writer",
-            r"\bincorrect\b",
-            r"\binaccurate\b",
-            r"unsupported claim",
-            r"advertising content",
-            r"\bad-derived\b",
-            r"promotional content",
-            r"\bdrop this\b",
-            r"\bshould be dropped\b",
-        ]
-        lower = last_ai_content.lower()
-        if any(re.search(p, lower) for p in revision_patterns):
-            return "writer"
-        return "editor"
+        classification = _get_page_classification(messages)
+        if classification == "advertisement":
+            log.info("Page classified as advertisement — skipping pipeline")
+            return END
+        log.info("Page classified as %s — proceeding", classification)
+        return "writer"
 
     # ------------------------------------------------------------------
     # Public run API
     # ------------------------------------------------------------------
 
     def run(self, topic: str) -> dict:
-        """Run the full swarm pipeline for a single topic.
-
-        The researcher is given an initial prompt to find material about
-        *topic* in the source documents.  The swarm then progresses through
-        writer → reviewer → editor automatically.
-
-        Args:
-            topic: Topic string to research and write a wiki article about.
-
-        Returns:
-            Final swarm state dict.
-        """
         log.info("Starting swarm for topic: %s", topic)
         initial_message = HumanMessage(
             content=(
@@ -387,18 +555,6 @@ class DocSwarm:
         return result
 
     def run_for_page(self, page: dict) -> dict:
-        """Run the swarm for a specific source page.
-
-        The researcher is primed with the page's full text so it starts from
-        real content rather than having to discover what to work on.
-
-        Args:
-            page: Page dict from the database (must include ``id``,
-                ``document_id``, ``page_number``, and ``raw_text``).
-
-        Returns:
-            Final swarm state dict.
-        """
         page_id = page["id"]
         page_number = page.get("page_number", "?")
         raw_text = page.get("raw_text") or ""
@@ -430,16 +586,13 @@ class DocSwarm:
         messages = result.get("messages", [])
         log.info("Swarm complete for page_id=%s (%d messages)", page_id, len(messages))
 
-        # Always mark the page as studied — do not rely on the LLM to call the tool.
-        # Skip salvage entirely if the researcher flagged the page as an ad.
+        # Determine article path from editor output
         article_path = ""
-        if not self._is_ad_skip(messages):
-            article_path = self._salvage_articles(
-                messages=messages,
-                page_id=page_id,
-                doc_title=doc_title,
-                page_number=page_number,
-            )
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and "Article written to:" in str(msg.content):
+                article_path = str(msg.content).replace("Article written to: ", "")
+                break
+
         self.db.log_page_study(
             page_id=page_id,
             document_id=page["document_id"],
@@ -447,142 +600,7 @@ class DocSwarm:
         )
         return result
 
-    def _salvage_articles(
-        self,
-        messages: list,
-        page_id: str,
-        doc_title: str,
-        page_number: int | str,
-    ) -> str:
-        """Ensure every entity found on this page has an article file.
-
-        First checks whether the editor already wrote files.  Then checks
-        the entity database for entities mentioned on this page and creates
-        a stub article for any entity that does not yet have a file.
-
-        If the writer produced usable article sections in the messages
-        (delimited by ``=== ARTICLE: ... ===``), those are used as content.
-        Otherwise a stub is generated from the entity's context text.
-
-        Returns:
-            The first article path written, or empty string if nothing saved.
-        """
-        root = Path(self.config.wiki_output_dir)
-
-        # Check if editor already wrote files during this run
-        for msg in messages:
-            if isinstance(msg, AIMessage):
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if "Article written to:" in content:
-                    log.debug("Editor appears to have written file(s) — no salvage needed")
-                    return ""
-
-        # Try to extract per-entity articles from writer output.
-        # The writer is prompted to delimit articles with === ARTICLE: name ===
-        article_bodies: dict[str, str] = {}
-        all_ai_text = ""
-        for msg in messages:
-            if isinstance(msg, AIMessage):
-                c = msg.content if isinstance(msg.content, str) else ""
-                if isinstance(msg.content, list):
-                    c = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b) for b in msg.content
-                    )
-                all_ai_text += c + "\n"
-
-        # Parse === ARTICLE: name === ... === END ARTICLE === blocks
-        article_pattern = re.compile(
-            r"===\s*ARTICLE:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ARTICLE\s*===",
-            re.DOTALL | re.IGNORECASE,
-        )
-        for match in article_pattern.finditer(all_ai_text):
-            name = match.group(1).strip()
-            body = match.group(2).strip()
-            if body and "ARTICLE NEEDED" not in body and "entity_id" not in body.lower():
-                article_bodies[name.lower()] = body
-
-        # Get all entities the researcher recorded for this page
-        entities = self.db.get_entities_for_page(page_id)
-        if not entities:
-            log.warning("No entities found for page_id=%s — nothing to salvage", page_id)
-            return ""
-
-        saved_paths = []
-        for entity in entities:
-            name = entity.get("name", "")
-            entity_type = entity.get("entity_type", "misc")
-            context = entity.get("context_text", "")
-
-            # Canonicalise entity type to avoid folder duplication
-            _CANONICAL_TYPES = {
-                "people": "person",
-                "persons": "person",
-                "organisations": "organisation",
-                "orgs": "organisation",
-                "org": "organisation",
-                "company": "organisation",
-                "places": "place",
-                "location": "place",
-                "locations": "place",
-                "events": "event",
-                "objects": "object",
-                "thing": "object",
-                "things": "object",
-                "concepts": "concept",
-                "idea": "concept",
-            }
-            raw_type = re.sub(r"[^a-z0-9]+", "-", entity_type.lower()).strip("-") or "misc"
-            safe_type = _CANONICAL_TYPES.get(raw_type, raw_type)
-            safe_name = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-            if not safe_name:
-                log.warning("Entity name %r has no alphanumeric chars — skipping", name)
-                continue
-            path = f"{safe_type}/{safe_name}"
-            file_path = root / (path + ".md")
-
-            # Skip if file already exists (editor or previous page already created it)
-            if file_path.exists():
-                log.debug("Article already exists: %s", file_path)
-                continue
-
-            # Use writer's article body if available, otherwise create a stub
-            body = article_bodies.get(name.lower(), "")
-            if not body:
-                # Build a stub article from entity context
-                body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
-                if context:
-                    body += f"\n{context}<sup>[1]</sup>\n"
-                body += f'\n## References\n\n1. "{doc_title}", p.{page_number}\n'
-
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "title": name,
-                "description": f"{name} — {entity_type}",
-                "entity_id": entity.get("id", ""),
-                "entity_type": entity_type,
-                "source_page_id": page_id,
-                "wiki_page_id": None,
-            }
-            file_path.write_text(_build_front_matter(meta) + body, encoding="utf-8")
-            log.info("Salvaged article → %s", file_path)
-            saved_paths.append(path)
-
-        if not saved_paths:
-            log.info("All entities for page_id=%s already have articles", page_id)
-            return ""
-
-        log.info("Salvaged %d article(s) for page_id=%s", len(saved_paths), page_id)
-        return ", ".join(saved_paths)
-
     def run_full_wiki_generation(self) -> list[dict]:
-        """Generate wiki articles for all unstudied pages in the database.
-
-        Repeatedly fetches the next unstudied page and runs the swarm until
-        all pages have been covered.
-
-        Returns:
-            List of final state dicts, one per page processed.
-        """
         results = []
         while True:
             page = self.db.get_next_unstudied_page()

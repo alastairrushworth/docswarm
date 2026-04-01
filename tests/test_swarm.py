@@ -9,7 +9,6 @@ from typing import Optional
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -83,17 +82,17 @@ class TestSwarmInit:
         assert swarm is not None
         assert swarm._graph is not None
 
-    def test_swarm_builds_graph_with_four_nodes(self, tmp_config, db):
+    def test_swarm_builds_graph_with_three_nodes(self, tmp_config, db):
         mock_llm = _make_mock_llm()
         wiki_client = _make_mock_wiki_client()
 
         with patch("docswarm.agents.swarm.ChatOllama", return_value=mock_llm):
             swarm = DocSwarm(config=tmp_config, db=db, wiki_client=wiki_client)
 
-        # The compiled graph has nodes for researcher, writer, reviewer, editor
+        # The compiled graph has nodes for researcher, writer, editor
         graph_nodes = swarm._graph.get_graph().nodes
         node_names = set(graph_nodes.keys())
-        for expected in ("researcher", "writer", "reviewer", "editor"):
+        for expected in ("researcher", "writer", "editor"):
             assert expected in node_names
 
 
@@ -352,17 +351,25 @@ class TestResearcherInvokeWithLongMessage:
 # ---------------------------------------------------------------------------
 
 
-class TestSalvageArticles:
+class TestRunEditor:
+    """Tests for the deterministic _run_editor method."""
+
     def _make_swarm(self, tmp_config, db):
         mock_llm = _make_mock_llm()
         wiki_client = _make_mock_wiki_client()
         with patch("docswarm.agents.swarm.ChatOllama", return_value=mock_llm):
             return DocSwarm(config=tmp_config, db=db, wiki_client=wiki_client)
 
+    def _make_state(self, messages, page_id, doc_title="Test Doc", page_number=1):
+        """Build a SwarmState dict with a properly formatted initial message."""
+        initial = HumanMessage(
+            content=f"Page ID: {page_id}\nDocument: {doc_title}\nPage: {page_number}"
+        )
+        return {"messages": [initial] + messages, "active_agent": "writer"}
+
     def test_creates_stub_articles_from_entities(self, tmp_config, db, sample_page):
-        """Salvage creates one file per entity recorded for the page."""
+        """Editor creates one file per entity recorded for the page."""
         swarm = self._make_swarm(tmp_config, db)
-        # Register two entities for the sample page
         eid1 = db.upsert_entity("Thomas Chippendale", "person")
         db.add_entity_mention(
             eid1,
@@ -375,13 +382,13 @@ class TestSalvageArticles:
             eid2, sample_page["id"], sample_page["document_id"], "Swiss brake manufacturer."
         )
 
-        path = swarm._salvage_articles(
-            messages=[HumanMessage(content="Initial"), AIMessage(content="Done.")],
-            page_id=sample_page["id"],
-            doc_title="Test Doc",
-            page_number=1,
+        state = self._make_state(
+            [AIMessage(content="Done.")], page_id=sample_page["id"]
         )
-        assert path != ""
+        result = swarm._run_editor(state)
+        summary = result["messages"][-1].content
+        assert "Article written to:" in summary
+
         from pathlib import Path
 
         root = Path(tmp_config.wiki_output_dir)
@@ -407,13 +414,13 @@ class TestSalvageArticles:
             '[Source: "Test Doc", p.1]\n'
             "=== END ARTICLE ==="
         )
-        path = swarm._salvage_articles(
-            messages=[HumanMessage(content="Initial"), AIMessage(content=writer_output)],
-            page_id=sample_page["id"],
-            doc_title="Test Doc",
-            page_number=1,
+        state = self._make_state(
+            [AIMessage(content=writer_output)], page_id=sample_page["id"]
         )
-        assert path != ""
+        result = swarm._run_editor(state)
+        summary = result["messages"][-1].content
+        assert "Article written to:" in summary
+
         from pathlib import Path
 
         saved = Path(tmp_config.wiki_output_dir) / "person" / "reg-harris.md"
@@ -422,31 +429,15 @@ class TestSalvageArticles:
         assert "British cycling champion" in text
         assert "world titles" in text
 
-    def test_skips_if_file_already_written(self, tmp_config, db, sample_page):
-        """If 'Article written to:' appears in messages, no salvage occurs."""
+    def test_writes_nothing_when_no_entities(self, tmp_config, db, sample_page):
+        """Returns 'No articles written.' when no entities exist for the page."""
         swarm = self._make_swarm(tmp_config, db)
-        messages = [
-            HumanMessage(content="Initial"),
-            AIMessage(content="Article written to: wiki/test.md"),
-        ]
-        path = swarm._salvage_articles(
-            messages=messages,
-            page_id=sample_page["id"],
-            doc_title="Test Doc",
-            page_number=1,
+        state = self._make_state(
+            [AIMessage(content="Nothing found.")], page_id=sample_page["id"]
         )
-        assert path == ""
-
-    def test_returns_empty_when_no_entities(self, tmp_config, db, sample_page):
-        """Returns '' when no entities have been recorded for the page."""
-        swarm = self._make_swarm(tmp_config, db)
-        path = swarm._salvage_articles(
-            messages=[HumanMessage(content="Start"), AIMessage(content="Nothing found.")],
-            page_id=sample_page["id"],
-            doc_title="Empty Doc",
-            page_number=1,
-        )
-        assert path == ""
+        result = swarm._run_editor(state)
+        summary = result["messages"][-1].content
+        assert summary == "No articles written."
 
     def test_skips_entities_with_existing_files(self, tmp_config, db, sample_page):
         """Entities that already have article files are not overwritten."""
@@ -454,23 +445,34 @@ class TestSalvageArticles:
         eid = db.upsert_entity("Existing Entity", "concept")
         db.add_entity_mention(eid, sample_page["id"], sample_page["document_id"], "Context.")
 
-        # Pre-create the file
         from pathlib import Path
 
         existing = Path(tmp_config.wiki_output_dir) / "concept" / "existing-entity.md"
         existing.parent.mkdir(parents=True, exist_ok=True)
         existing.write_text("# Already here\n")
 
-        path = swarm._salvage_articles(
-            messages=[HumanMessage(content="Initial")],
-            page_id=sample_page["id"],
-            doc_title="Test",
-            page_number=1,
+        state = self._make_state(
+            [AIMessage(content="No writer output.")], page_id=sample_page["id"]
         )
-        # Should return "" since the only entity already has a file
-        assert path == ""
-        # Original content should be untouched
+        result = swarm._run_editor(state)
+        summary = result["messages"][-1].content
+        assert summary == "No articles written."
         assert "Already here" in existing.read_text()
+
+    def test_filters_masthead_entities(self, tmp_config, db, sample_page):
+        """Entities with masthead roles in short context are filtered out."""
+        swarm = self._make_swarm(tmp_config, db)
+        eid = db.upsert_entity("John Smith", "person")
+        db.add_entity_mention(
+            eid, sample_page["id"], sample_page["document_id"], "Editor of the magazine."
+        )
+
+        state = self._make_state(
+            [AIMessage(content="Done.")], page_id=sample_page["id"]
+        )
+        result = swarm._run_editor(state)
+        summary = result["messages"][-1].content
+        assert summary == "No articles written."
 
 
 # ---------------------------------------------------------------------------
@@ -536,94 +538,3 @@ class TestRunFullWikiStopsWhenAllStudied:
             results = swarm.run_full_wiki_generation()
 
         assert len(results) == 1
-
-
-# ---------------------------------------------------------------------------
-# Reviewer routing
-# ---------------------------------------------------------------------------
-
-
-class TestRouteFromReviewer:
-    def _make_swarm(self, tmp_config, db):
-        mock_llm = _make_mock_llm()
-        wiki_client = _make_mock_wiki_client()
-        with patch("docswarm.agents.swarm.ChatOllama", return_value=mock_llm):
-            return DocSwarm(config=tmp_config, db=db, wiki_client=wiki_client)
-
-    def test_routes_to_editor_when_no_revision_keywords(self, tmp_config, db):
-        swarm = self._make_swarm(tmp_config, db)
-        state = {
-            "messages": [
-                HumanMessage(content="Initial"),
-                AIMessage(content="The article looks good. Well written and accurate."),
-            ],
-            "active_agent": "reviewer",
-        }
-        result = swarm._route_from_reviewer(state)
-        assert result == "editor"
-
-    def test_routes_to_writer_when_revision_needed(self, tmp_config, db):
-        swarm = self._make_swarm(tmp_config, db)
-        state = {
-            "messages": [
-                HumanMessage(content="Initial"),
-                AIMessage(content="This article needs revision. The dates are incorrect."),
-            ],
-            "active_agent": "reviewer",
-        }
-        result = swarm._route_from_reviewer(state)
-        assert result == "writer"
-
-    @pytest.mark.parametrize(
-        "keyword",
-        [
-            "revision needed",
-            "needs revision",
-            "revise",
-            "rewrite",
-            "return to writer",
-            "back to writer",
-            "incorrect",
-            "inaccurate",
-            "unsupported claim",
-        ],
-    )
-    def test_routes_to_writer_for_each_keyword(self, tmp_config, db, keyword):
-        swarm = self._make_swarm(tmp_config, db)
-        state = {
-            "messages": [
-                AIMessage(content=f"The article has an issue: {keyword} in section 2."),
-            ],
-            "active_agent": "reviewer",
-        }
-        result = swarm._route_from_reviewer(state)
-        assert result == "writer"
-
-    def test_routes_to_editor_with_empty_messages(self, tmp_config, db):
-        swarm = self._make_swarm(tmp_config, db)
-        state = {"messages": [], "active_agent": "reviewer"}
-        result = swarm._route_from_reviewer(state)
-        assert result == "editor"
-
-    def test_routes_to_editor_with_only_human_messages(self, tmp_config, db):
-        swarm = self._make_swarm(tmp_config, db)
-        state = {
-            "messages": [HumanMessage(content="Please review this article.")],
-            "active_agent": "reviewer",
-        }
-        result = swarm._route_from_reviewer(state)
-        assert result == "editor"
-
-    def test_uses_last_ai_message_for_routing(self, tmp_config, db):
-        """Routing decision should be based on the most recent AIMessage."""
-        swarm = self._make_swarm(tmp_config, db)
-        state = {
-            "messages": [
-                AIMessage(content="revision needed here"),  # older — needs revision
-                AIMessage(content="The article looks great."),  # newer — approved
-            ],
-            "active_agent": "reviewer",
-        }
-        # Most recent message approves → should route to editor
-        result = swarm._route_from_reviewer(state)
-        assert result == "editor"
