@@ -20,7 +20,6 @@ from langgraph.prebuilt import create_react_agent
 from docswarm.agents.personas import RESEARCHER_PROMPT
 from docswarm.agents.personas import WRITER_PROMPT
 from docswarm.agents.tools.db_tools import create_db_tools
-from docswarm.agents.tools.entity_tools import create_entity_tools
 from docswarm.agents.tools.file_tools import _build_front_matter
 from docswarm.agents.tools.file_tools import create_file_read_tools
 from docswarm.agents.tools.pdf_tools import create_classification_tools
@@ -78,6 +77,12 @@ _ARTICLE_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Pattern for researcher entity blocks: === ENTITY: Name (type) === ... === END ENTITY ===
+_ENTITY_PATTERN = re.compile(
+    r"===\s*ENTITY:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ENTITY\s*===",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,7 +107,7 @@ def _safe_name(name: str) -> str:
 
 def _is_masthead_entity(entity: dict) -> bool:
     """Return True if an entity looks like a masthead credit, not an editorial subject."""
-    context = (entity.get("context_text") or "").lower()
+    context = (entity.get("context_text") or entity.get("context") or "").lower()
     if len(context.split()) > 20:
         return False  # substantial context — probably editorial
     return bool(_MASTHEAD_ROLES & set(context.split()))
@@ -137,6 +142,35 @@ def _collect_ai_text(messages: list) -> str:
             if c:
                 parts.append(c)
     return "\n".join(parts)
+
+
+def _extract_entity_blocks(messages: list) -> list[dict]:
+    """Parse === ENTITY: Name (type) === blocks from researcher AI messages.
+
+    Returns:
+        List of dicts with keys: name, entity_type, context.
+    """
+    all_ai_text = _collect_ai_text(messages)
+    entities = []
+    for match in _ENTITY_PATTERN.finditer(all_ai_text):
+        header = match.group(1).strip()
+        body = match.group(2).strip()
+        if not body:
+            continue
+        # Parse "Name (type)" from header
+        type_match = re.match(r"^(.+?)\s*\((\w+)\)\s*$", header)
+        if type_match:
+            name = type_match.group(1).strip()
+            entity_type = type_match.group(2).strip().lower()
+        else:
+            name = header
+            entity_type = "misc"
+        entities.append({
+            "name": name,
+            "entity_type": _safe_type(entity_type),
+            "context": body,
+        })
+    return entities
 
 
 # Fallback pattern: markdown heading like "# Entity Name" or "## Entity Name"
@@ -272,7 +306,6 @@ class DocSwarm:
 
         # Build tool lists
         db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
         classification_tools = create_classification_tools(
             db,
             config=config,
@@ -286,7 +319,6 @@ class DocSwarm:
         research_tools = (
             classification_tools
             + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
-            + _pick(entity_tools, "save_entity", "search_entities", "get_entities_for_page")
             + _pick(file_read_tools, "search_article_files")
         )
         writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
@@ -340,6 +372,16 @@ class DocSwarm:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _log_input_messages(agent_name: str, messages: list) -> None:
+        """Log the messages being sent as input to an LLM agent."""
+        log.debug("[%s] INPUT: %d message(s)", agent_name, len(messages))
+        for i, msg in enumerate(messages):
+            msg_type = type(msg).__name__
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            preview = content[:500].replace("\n", " ↵ ")
+            log.debug("[%s] INPUT[%d] %s → %s", agent_name, i, msg_type, preview)
+
+    @staticmethod
     def _log_new_messages(agent_name: str, old_count: int, messages: list) -> None:
         for msg in messages[old_count:]:
             if isinstance(msg, AIMessage):
@@ -364,6 +406,7 @@ class DocSwarm:
 
     def _run_researcher(self, state: SwarmState) -> dict:
         log.info("[researcher] starting")
+        self._log_input_messages("researcher", state["messages"])
         old_count = len(state["messages"])
         result = self._researcher.invoke({"messages": state["messages"]})
         self._log_new_messages("researcher", old_count, result["messages"])
@@ -372,6 +415,7 @@ class DocSwarm:
 
     def _run_writer(self, state: SwarmState) -> dict:
         log.info("[writer] starting")
+        self._log_input_messages("writer", state["messages"])
         old_count = len(state["messages"])
         result = self._writer.invoke({"messages": state["messages"]})
         self._log_new_messages("writer", old_count, result["messages"])
@@ -408,61 +452,55 @@ class DocSwarm:
         article_blocks = _extract_article_blocks(messages)
         log.info("[editor] found %d article block(s) from writer", len(article_blocks))
         if not article_blocks:
-            # Log raw writer text for debugging
             for msg in reversed(messages):
                 if isinstance(msg, AIMessage):
                     raw = msg.content if isinstance(msg.content, str) else str(msg.content)
                     log.debug("[editor] last writer AI text: %s", raw[:800].replace("\n", " ↵ "))
                     break
 
-        # Get entities for this page
-        entities = self.db.get_entities_for_page(page_id) if page_id else []
-
-        # Filter out masthead entities
-        filtered = [e for e in entities if not _is_masthead_entity(e)]
-        if len(filtered) < len(entities):
-            log.info(
-                "[editor] filtered %d masthead entit(ies)", len(entities) - len(filtered)
-            )
+        # Parse entity blocks from researcher output
+        entity_blocks = _extract_entity_blocks(messages)
+        log.info("[editor] found %d entity block(s) from researcher", len(entity_blocks))
 
         root = Path(self.config.wiki_output_dir)
         written_paths = []
-        matched_blocks = set()  # track which article blocks we've used
+        matched_blocks = set()
 
-        # Phase 1: Write articles for entities that have matching writer output
-        for entity in filtered:
-            name = entity.get("name", "")
-            entity_type = entity.get("entity_type", "misc")
-            context = entity.get("context_text", "")
+        # Phase 1: Write articles for researcher entities with matching writer output
+        for entity in entity_blocks:
+            name = entity["name"]
+            entity_type = entity["entity_type"]
+            context = entity["context"]
             slug = _safe_name(name)
             if not slug:
                 continue
 
+            if _is_masthead_entity(entity):
+                log.debug("[editor] skipping masthead entity: %s", name)
+                continue
+
             etype = _safe_type(entity_type)
-            path = f"{etype}/{slug}"
-            file_path = root / (path + ".md")
+            file_path = root / etype / (slug + ".md")
 
             if file_path.exists():
                 log.debug("[editor] article already exists: %s", file_path)
                 continue
 
-            # Try to match with writer's article blocks
             match = _match_entity_to_article(name, article_blocks)
             if match:
                 title, body = match
                 matched_blocks.add(_normalize(title))
             else:
-                # Stub from entity context
+                # Stub from researcher context
                 body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
                 if context:
-                    body += f"\n{context}<sup>[1]</sup>\n"
+                    body += f"\n{context}\n"
                 body += f'\n## References\n\n1. "{doc_title}", p.{page_number}\n'
 
             file_path.parent.mkdir(parents=True, exist_ok=True)
             meta = {
                 "title": name,
                 "description": f"{name} — {entity_type}",
-                "entity_id": entity.get("id", ""),
                 "entity_type": entity_type,
                 "source_page_id": page_id,
                 "wiki_page_id": None,
@@ -471,8 +509,7 @@ class DocSwarm:
             log.info("[editor] wrote article → %s", file_path)
             written_paths.append(str(file_path))
 
-        # Phase 2: Write any unmatched article blocks (writer produced content
-        # for entities the researcher didn't save — still valuable)
+        # Phase 2: Write any unmatched writer article blocks
         for norm_key, (title, body) in article_blocks.items():
             if norm_key in matched_blocks:
                 continue
@@ -482,27 +519,21 @@ class DocSwarm:
             if _META_HEADING_RE.search(title):
                 log.debug("[editor] skipping meta-content block: %s", title)
                 continue
-            # Infer type: check DB first, then scan body text, default to "person"
+            # Infer type from body text, default to "person"
             etype = ""
-            db_entity = self.db.get_entity_by_name(title) if self.db else None
-            if db_entity:
-                etype = _safe_type(db_entity.get("entity_type", ""))
-            if not etype:
-                for label in ("organisation", "place", "event", "object", "concept"):
-                    if label in body.lower()[:300]:
-                        etype = label
-                        break
+            for label in ("organisation", "place", "event", "object", "concept"):
+                if label in body.lower()[:300]:
+                    etype = label
+                    break
             if not etype:
                 etype = "person"
-            path = f"{etype}/{slug}"
-            file_path = root / (path + ".md")
+            file_path = root / etype / (slug + ".md")
             if file_path.exists():
                 continue
             file_path.parent.mkdir(parents=True, exist_ok=True)
             meta = {
                 "title": title,
                 "description": title,
-                "entity_id": "",
                 "entity_type": etype,
                 "source_page_id": page_id,
                 "wiki_page_id": None,

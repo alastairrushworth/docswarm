@@ -18,8 +18,8 @@ from langchain_core.outputs import ChatResult
 
 from docswarm.agents.swarm import DocSwarm
 from docswarm.agents.tools.db_tools import create_db_tools
-from docswarm.agents.tools.entity_tools import create_entity_tools
 from docswarm.agents.tools.file_tools import create_file_read_tools
+from docswarm.agents.tools.pdf_tools import create_classification_tools
 from docswarm.agents.tools.pdf_tools import create_pdf_tools
 
 # ---------------------------------------------------------------------------
@@ -105,47 +105,50 @@ class TestToolFactoryCounts:
     def test_tool_factory_output_counts(self, tmp_config, db):
         """Verify each tool factory produces the expected number of tools."""
         db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
+        classification_tools = create_classification_tools(db, config=tmp_config)
         pdf_tools = create_pdf_tools(db)
         file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
 
         assert len(db_tools) == 7, f"Expected 7 db_tools, got {len(db_tools)}"
-        assert len(entity_tools) == 4, f"Expected 4 entity_tools, got {len(entity_tools)}"
+        assert len(classification_tools) == 1, f"Expected 1 classification_tools, got {len(classification_tools)}"
         assert len(pdf_tools) == 2, f"Expected 2 pdf_tools, got {len(pdf_tools)}"
         assert len(file_read_tools) == 3, f"Expected 3 file_read_tools, got {len(file_read_tools)}"
 
     def test_tool_names(self, tmp_config, db):
+        """Verify the researcher and writer tool lists match what the swarm builds."""
         db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
-        pdf_tools = create_pdf_tools(db)
+        classification_tools = create_classification_tools(db, config=tmp_config)
         file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
 
-        all_tools = db_tools + entity_tools + pdf_tools + file_read_tools
-        names = {t.name for t in all_tools}
+        def _pick(tools, *names):
+            name_set = set(names)
+            return [t for t in tools if t.name in name_set]
 
-        expected_names = {
-            # db_tools (7)
+        research_tools = (
+            classification_tools
+            + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
+            + _pick(file_read_tools, "search_article_files")
+        )
+        writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
+            file_read_tools, "search_article_files", "read_article_file"
+        )
+
+        research_names = {t.name for t in research_tools}
+        writer_names = {t.name for t in writer_tools}
+
+        assert research_names == {
+            "classify_page_content",
             "search_chunks",
-            "get_chunk",
             "get_page_text",
             "list_documents",
-            "get_document_chunks",
-            "get_page_study_status",
-            "mark_page_studied",
-            # entity_tools (4)
-            "save_entity",
-            "search_entities",
-            "get_entities_for_page",
-            "get_entity_mentions",
-            # pdf_tools (2)
-            "get_page_image_info",
-            "get_source_reference",
-            # file_read_tools (3)
-            "read_article_file",
-            "list_article_files",
             "search_article_files",
         }
-        assert names == expected_names
+        assert writer_names == {
+            "search_chunks",
+            "get_page_text",
+            "search_article_files",
+            "read_article_file",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +160,9 @@ class TestToolSchemaSerialization:
     def test_all_researcher_tool_schemas_serialize_to_json(self, tmp_config, db):
         """Every tool's schema must be JSON-serialisable."""
         db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
-        pdf_tools = create_pdf_tools(db)
+        classification_tools = create_classification_tools(db, config=tmp_config)
         file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
-        all_tools = db_tools + entity_tools + pdf_tools + file_read_tools
+        all_tools = db_tools + classification_tools + file_read_tools
 
         schemas = []
         for t in all_tools:
@@ -197,21 +199,29 @@ class TestToolSchemaSerialization:
 
 
 class TestResearcherInvokeWithMockLLM:
+    @staticmethod
+    def _build_research_tools(tmp_config, db):
+        db_tools = create_db_tools(db)
+        classification_tools = create_classification_tools(db, config=tmp_config)
+        file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
+
+        def _pick(tools, *names):
+            return [t for t in tools if t.name in set(names)]
+
+        return (
+            classification_tools
+            + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
+            + _pick(file_read_tools, "search_article_files")
+        )
+
     def test_invoke_does_not_crash_with_short_message(self, tmp_config, db):
         """Researcher invoke works with a short message and mocked LLM."""
         from langgraph.prebuilt import create_react_agent
 
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
-        db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
-        pdf_tools = create_pdf_tools(db)
-        file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
-        research_tools = db_tools + entity_tools + pdf_tools + file_read_tools
-
+        research_tools = self._build_research_tools(tmp_config, db)
         mock_llm = _make_mock_llm()
-
-        # create_react_agent calls bind_tools internally
         researcher = create_react_agent(mock_llm, tools=research_tools, prompt=RESEARCHER_PROMPT)
 
         initial_message = HumanMessage(content="Research the topic: Victorian furniture.")
@@ -224,9 +234,9 @@ class TestResearcherInvokeWithMockLLM:
 
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
-        tools = create_db_tools(db) + create_entity_tools(db)
+        research_tools = self._build_research_tools(tmp_config, db)
         mock_llm = _make_mock_llm()
-        researcher = create_react_agent(mock_llm, tools=tools, prompt=RESEARCHER_PROMPT)
+        researcher = create_react_agent(mock_llm, tools=research_tools, prompt=RESEARCHER_PROMPT)
 
         result = researcher.invoke({"messages": [HumanMessage(content="Test")]})
         ai_messages = [m for m in result["messages"] if isinstance(m, AIMessage)]
@@ -240,16 +250,12 @@ class TestResearcherInvokeWithMockLLM:
 
 class TestResearcherInvokeWithAllTools:
     def test_create_react_agent_accepts_all_tools(self, tmp_config, db):
-        """Verify create_react_agent works with the full set of available tools."""
+        """Verify create_react_agent works with the researcher tool set."""
         from langgraph.prebuilt import create_react_agent
 
         from docswarm.agents.personas import RESEARCHER_PROMPT
 
-        db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
-        pdf_tools = create_pdf_tools(db)
-        file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
-        research_tools = db_tools + entity_tools + pdf_tools + file_read_tools
+        research_tools = TestResearcherInvokeWithMockLLM._build_research_tools(tmp_config, db)
 
         mock_llm = _make_mock_llm()
         researcher = create_react_agent(mock_llm, tools=research_tools, prompt=RESEARCHER_PROMPT)
@@ -261,14 +267,9 @@ class TestResearcherInvokeWithAllTools:
     def test_invoke_result_contains_expected_fields(self, tmp_config, db):
         from langgraph.prebuilt import create_react_agent
 
-        tools = (
-            create_db_tools(db)
-            + create_entity_tools(db)
-            + create_pdf_tools(db)
-            + create_file_read_tools(str(tmp_config.wiki_output_dir))
-        )
+        research_tools = TestResearcherInvokeWithMockLLM._build_research_tools(tmp_config, db)
         mock_llm = _make_mock_llm()
-        agent = create_react_agent(mock_llm, tools=tools)
+        agent = create_react_agent(mock_llm, tools=research_tools)
         result = agent.invoke({"messages": [HumanMessage(content="test")]})
         assert isinstance(result, dict)
         assert "messages" in result
@@ -284,11 +285,7 @@ class TestResearcherInvokeWithLongMessage:
         """Researcher invoke works with a large (~2500 char) initial message."""
         from langgraph.prebuilt import create_react_agent
 
-        db_tools = create_db_tools(db)
-        entity_tools = create_entity_tools(db)
-        pdf_tools = create_pdf_tools(db)
-        file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
-        research_tools = db_tools + entity_tools + pdf_tools + file_read_tools
+        research_tools = TestResearcherInvokeWithMockLLM._build_research_tools(tmp_config, db)
 
         # Simulate the real initial message format used in run_for_page
         long_page_text = (
@@ -368,22 +365,22 @@ class TestRunEditor:
         return {"messages": [initial] + messages, "active_agent": "writer"}
 
     def test_creates_stub_articles_from_entities(self, tmp_config, db, sample_page):
-        """Editor creates one file per entity recorded for the page."""
+        """Editor creates one file per entity from researcher entity blocks."""
         swarm = self._make_swarm(tmp_config, db)
-        eid1 = db.upsert_entity("Thomas Chippendale", "person")
-        db.add_entity_mention(
-            eid1,
-            sample_page["id"],
-            sample_page["document_id"],
-            "Famous cabinet-maker from Yorkshire.",
-        )
-        eid2 = db.upsert_entity("Weinmann", "organisation")
-        db.add_entity_mention(
-            eid2, sample_page["id"], sample_page["document_id"], "Swiss brake manufacturer."
-        )
 
+        researcher_output = (
+            "=== ENTITY: Thomas Chippendale (person) ===\n"
+            "Famous cabinet-maker from Yorkshire.\n"
+            'Source: "Test Doc", p.1\n'
+            "=== END ENTITY ===\n\n"
+            "=== ENTITY: Weinmann (organisation) ===\n"
+            "Swiss brake manufacturer.\n"
+            'Source: "Test Doc", p.1\n'
+            "=== END ENTITY ==="
+        )
         state = self._make_state(
-            [AIMessage(content="Done.")], page_id=sample_page["id"]
+            [AIMessage(content=researcher_output), AIMessage(content="Done.")],
+            page_id=sample_page["id"],
         )
         result = swarm._run_editor(state)
         summary = result["messages"][-1].content
@@ -402,11 +399,13 @@ class TestRunEditor:
     def test_uses_writer_article_body_when_available(self, tmp_config, db, sample_page):
         """If the writer produced === ARTICLE === blocks, use that content."""
         swarm = self._make_swarm(tmp_config, db)
-        eid = db.upsert_entity("Reg Harris", "person")
-        db.add_entity_mention(
-            eid, sample_page["id"], sample_page["document_id"], "Champion cyclist."
-        )
 
+        researcher_output = (
+            "=== ENTITY: Reg Harris (person) ===\n"
+            "Champion cyclist.\n"
+            'Source: "Test Doc", p.1\n'
+            "=== END ENTITY ==="
+        )
         writer_output = (
             "=== ARTICLE: Reg Harris ===\n"
             "**Reg Harris** was a British cycling champion.\n\n"
@@ -415,7 +414,8 @@ class TestRunEditor:
             "=== END ARTICLE ==="
         )
         state = self._make_state(
-            [AIMessage(content=writer_output)], page_id=sample_page["id"]
+            [AIMessage(content=researcher_output), AIMessage(content=writer_output)],
+            page_id=sample_page["id"],
         )
         result = swarm._run_editor(state)
         summary = result["messages"][-1].content
@@ -442,8 +442,12 @@ class TestRunEditor:
     def test_skips_entities_with_existing_files(self, tmp_config, db, sample_page):
         """Entities that already have article files are not overwritten."""
         swarm = self._make_swarm(tmp_config, db)
-        eid = db.upsert_entity("Existing Entity", "concept")
-        db.add_entity_mention(eid, sample_page["id"], sample_page["document_id"], "Context.")
+
+        researcher_output = (
+            "=== ENTITY: Existing Entity (concept) ===\n"
+            "Some context.\n"
+            "=== END ENTITY ==="
+        )
 
         from pathlib import Path
 
@@ -452,7 +456,7 @@ class TestRunEditor:
         existing.write_text("# Already here\n")
 
         state = self._make_state(
-            [AIMessage(content="No writer output.")], page_id=sample_page["id"]
+            [AIMessage(content=researcher_output)], page_id=sample_page["id"]
         )
         result = swarm._run_editor(state)
         summary = result["messages"][-1].content
@@ -462,13 +466,14 @@ class TestRunEditor:
     def test_filters_masthead_entities(self, tmp_config, db, sample_page):
         """Entities with masthead roles in short context are filtered out."""
         swarm = self._make_swarm(tmp_config, db)
-        eid = db.upsert_entity("John Smith", "person")
-        db.add_entity_mention(
-            eid, sample_page["id"], sample_page["document_id"], "Editor of the magazine."
-        )
 
+        researcher_output = (
+            "=== ENTITY: John Smith (person) ===\n"
+            "Editor of the magazine.\n"
+            "=== END ENTITY ==="
+        )
         state = self._make_state(
-            [AIMessage(content="Done.")], page_id=sample_page["id"]
+            [AIMessage(content=researcher_output)], page_id=sample_page["id"]
         )
         result = swarm._run_editor(state)
         summary = result["messages"][-1].content

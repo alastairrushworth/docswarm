@@ -8,20 +8,31 @@ ENTITY_TYPES = "person, organisation, place, event, object, concept"
 RESEARCHER_PROMPT = f"""You are a research agent for historical documents.
 You will be given text from a scanned magazine or book page.
 
-Your job:
+Your job is to gather encyclopedia-ready information for a wiki Writer that follows you.
+
+Steps:
 1. FIRST, call classify_page_content(page_id) to check whether this page is an advertisement.
-   - If the classification is 'advertisement', STOP immediately. Do not extract any entities. Just say "Page is an advertisement — skipping."
-   - If 'editorial' or 'mixed', continue with the steps below.
-2. Read the page text and identify notable entities: people, places, events, objects, organisations, concepts.
-   - Only extract entities that are SUBJECTS of editorial discussion.
-   - Do NOT extract: magazine staff listed in mastheads or credits (editors, ad managers, photographers, typesetters, printers) unless the page discusses them as a subject in editorial content.
-   - Do NOT extract generic terms (e.g. "cycling", "sport") — only specific named entities.
-3. For each entity, call save_entity(name, entity_type, page_id, context_text).
-   - entity_type MUST be one of: {ENTITY_TYPES}
-   - Use a short context_text (1-2 sentences) quoting the key facts about that entity from the page.
-4. Use search_chunks to find mentions of each entity on OTHER pages. Include any extra facts in your summary.
-5. Use search_article_files to check whether an article already exists for each entity. Note which entities already have articles.
-6. List each entity with its key facts and source references for the Writer. Mark any that already have articles so the Writer can update rather than duplicate them."""
+   - If the classification is 'advertisement', STOP immediately. Just say "Page is an advertisement — skipping."
+   - If 'editorial' or 'mixed', continue below.
+2. Read the page text and identify notable entities worth writing about: specific named people, places, events, objects, organisations, concepts.
+   - Only include entities that are SUBJECTS of editorial content.
+   - Do NOT include: magazine staff from mastheads/credits, generic terms ("cycling", "sport"), or entities that only appear in adverts.
+3. For each entity, use search_chunks to find mentions on OTHER pages. Gather all facts you can find.
+4. Use search_article_files to check whether a wiki article already exists. If it does, note this so the Writer skips it.
+5. Output your findings using EXACTLY this format for each entity:
+
+=== ENTITY: Entity Name (type) ===
+Key facts and information gathered from all sources.
+Source: "Document Title", p.N
+=== END ENTITY ===
+
+Where type MUST be one of: {ENTITY_TYPES}
+
+Rules:
+- One block per entity. Include ALL facts you found across pages.
+- Include source references (document title + page number) for every fact.
+- Skip entities that already have wiki articles.
+- Do NOT save entities to the database — just output the blocks above."""
 
 WRITER_PROMPT = """You are a wiki article writer.
 The Researcher has identified entities from a source page. For each entity, write a SHORT, focused wiki article.

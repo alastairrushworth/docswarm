@@ -14,7 +14,7 @@ flowchart LR
     START((Start)) --> NEXT["get_next_unstudied_page()"]
     NEXT -->|"page dict"| RESEARCHER
 
-    RESEARCHER["<b>Researcher</b><br/><i>ReAct LLM agent</i><br/>8 tools<br/><br/>Classifies page,<br/>extracts entities,<br/>saves to DB"]
+    RESEARCHER["<b>Researcher</b><br/><i>ReAct LLM agent</i><br/>5 tools<br/><br/>Classifies page,<br/>gathers entity info,<br/>outputs entity blocks"]
 
     RESEARCHER -->|"all messages"| ROUTE{"Classification?"}
 
@@ -25,7 +25,7 @@ flowchart LR
 
     WRITER -->|"all messages"| EDITOR
 
-    EDITOR["<b>Editor</b><br/><i>Deterministic Python</i><br/>no LLM<br/><br/>Parses output,<br/>writes markdown files"]
+    EDITOR["<b>Editor</b><br/><i>Deterministic Python</i><br/>no LLM<br/><br/>Parses entity + article blocks<br/>from messages, writes markdown"]
 
     EDITOR -->|"new articles"| WIKI_IN
     EDITOR --> MARK
@@ -64,14 +64,15 @@ flowchart LR
 The researcher runs as a **single ReAct LLM invoke()** — the LLM autonomously decides which tools to call and in what order. The steps below are the typical sequence.
 
 ```mermaid
-flowchart TD
-    IN["<b>Input:</b> page text, image path, metadata"]
+flowchart LR
+    IN["<b>Input:</b> page text,<br/>image path, metadata"]
 
     IN --> S1
 
     S1["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> page image + OCR text &rarr; vision LLM<br/><i>Returns:</i> editorial / advertisement / mixed"]
 
-    S1 -->|"classification label"| S2
+    S1 -->|"advertisement"| OUT_AD["<b>Output:</b> classification only<br/>(LLM stops, no entities)"]
+    S1 -->|"editorial / mixed"| S2
 
     S2["<b>2. Read page content</b><br/><i>Tools:</i> get_page_text, search_chunks<br/><i>How:</i> SQL queries on chunks table<br/><i>Returns:</i> full OCR text + relevant chunks"]
 
@@ -81,25 +82,27 @@ flowchart TD
 
     S3 -->|"entity names + types"| S4
 
-    S4["<b>4. Save entities</b><br/><i>Tools:</i> search_entities, save_entity<br/><i>How:</i> check for duplicates first,<br/>then SQL insert per entity<br/><i>Returns:</i> entity IDs stored in DB"]
+    S4["<b>4. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities already<br/>have articles vs need new ones"]
 
-    S4 -->|"saved entity IDs"| S5
+    S4 --> S5
 
-    S5["<b>5. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities already<br/>have articles vs need new ones"]
+    S5["<b>5. Output entity blocks</b><br/><i>How:</i> LLM outputs structured<br/>=== ENTITY: Name (type) ===<br/>facts + sources<br/>=== END ENTITY ===<br/><i>Returns:</i> entity:info pairs in messages"]
 
-    S5 --> OUT["<b>Output:</b> messages with classification<br/>+ entities saved in DB"]
+    S5 --> OUT["<b>Output:</b> messages with classification<br/>+ entity blocks (no DB writes)"]
 
     %% Styling
     classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
     classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
     classDef srcMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
     classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef srcStop fill:#999,stroke:#666,color:#fff
 
     class S1 srcMixed
     class S2 srcDb
     class S3 srcLlm
-    class S4 srcDb
-    class S5 srcWiki
+    class S4 srcWiki
+    class S5 srcLlm
+    class OUT_AD srcStop
 ```
 
 ---
@@ -109,8 +112,8 @@ flowchart TD
 The writer also runs as a **single ReAct LLM invoke()**, receiving the full message history from the researcher.
 
 ```mermaid
-flowchart TD
-    IN["<b>Input:</b> researcher messages + entity list"]
+flowchart LR
+    IN["<b>Input:</b> researcher messages<br/>+ entity blocks"]
 
     IN --> S1
 
@@ -143,12 +146,12 @@ flowchart TD
 The editor is **deterministic Python** — no LLM calls. It receives the full message history and writes files to disk.
 
 ```mermaid
-flowchart TD
-    IN["<b>Input:</b> all messages (researcher + writer)<br/>+ entity list from DB"]
+flowchart LR
+    IN["<b>Input:</b> all messages<br/>(researcher + writer)"]
 
     IN -->|"regex scan all AI messages"| S1
 
-    S1["<b>1. Parse article blocks</b><br/><i>Primary:</i> regex for === ARTICLE === delimiters<br/><i>Fallback:</i> markdown heading boundaries<br/><i>Returns:</i> dict of title &rarr; body"]
+    S1["<b>1. Parse blocks</b><br/><i>Entity blocks:</i> === ENTITY === from researcher<br/><i>Article blocks:</i> === ARTICLE === from writer<br/><i>Fallback:</i> markdown heading boundaries<br/><i>Returns:</i> entity list + article dict"]
 
     S1 -->|"raw blocks"| S2
 
@@ -160,7 +163,7 @@ flowchart TD
 
     S3 -->|"matched + unmatched"| S4
 
-    S4["<b>4. Write markdown files</b><br/><i>Phase a:</i> entity + matched block &rarr; full article<br/><i>Phase b:</i> unmatched block &rarr; infer type from DB, write<br/><i>Phase c:</i> unmatched entity &rarr; stub from context text<br/><br/><i>Each file:</i> YAML front matter + body<br/><i>Path:</i> wiki/entity_type/slug.md"]
+    S4["<b>4. Write markdown files</b><br/><i>Phase a:</i> entity + matched article &rarr; full article<br/><i>Phase b:</i> unmatched article block &rarr; infer type, write<br/><i>Phase c:</i> unmatched entity &rarr; stub from context<br/><br/><i>Each file:</i> YAML front matter + body<br/><i>Path:</i> wiki/entity_type/slug.md"]
 
     S4 --> OUT["<b>Output:</b> written article paths"]
 
@@ -176,10 +179,29 @@ flowchart TD
 
 | Stage | Type | Tools | Input | Output |
 |-------|------|-------|-------|--------|
-| **Researcher** | ReAct LLM | 8 | Page text + image | Classification + entities in DB |
+| **Researcher** | ReAct LLM | 5 | Page text + image | Classification + entity blocks in messages |
 | **Router** | Deterministic | 0 | ToolMessage from classify | `"writer"` or `END` |
 | **Writer** | ReAct LLM | 4 | Researcher messages | `=== ARTICLE ===` delimited blocks |
-| **Editor** | Deterministic Python | 0 | All messages + DB entities | Markdown files in `wiki/` |
+| **Editor** | Deterministic Python | 0 | All messages (entity + article blocks) | Markdown files in `wiki/` |
+
+### Researcher Tools (5)
+
+| Tool | Source | Purpose |
+|------|--------|---------|
+| `classify_page_content` | PDF image + OCR | Determine if page is ad/editorial/mixed |
+| `search_chunks` | DuckDB | Find text chunks matching a query |
+| `get_page_text` | DuckDB | Get full OCR text for a page |
+| `list_documents` | DuckDB | List available documents |
+| `search_article_files` | wiki/*.md | Check if an article already exists |
+
+### Writer Tools (4)
+
+| Tool | Source | Purpose |
+|------|--------|---------|
+| `search_chunks` | DuckDB | Find supporting text passages |
+| `get_page_text` | DuckDB | Get full OCR text for a page |
+| `search_article_files` | wiki/*.md | Check existing articles |
+| `read_article_file` | wiki/*.md | Read an existing article's content |
 
 ### LLM Backend
 

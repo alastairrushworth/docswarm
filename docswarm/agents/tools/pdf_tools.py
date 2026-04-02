@@ -178,6 +178,16 @@ def create_classification_tools(db: "DatabaseManager", config: "Config") -> list
         )
 
         try:
+            backend = "ollama" if config.use_ollama else "openai"
+            model_name = config.model if config.use_ollama else config.openai_model
+            log.debug(
+                "[classify] INPUT page=%s backend=%s model=%s words=%d prompt=%s",
+                page_id,
+                backend,
+                model_name,
+                word_count,
+                prompt[:300].replace("\n", " ↵ "),
+            )
             if config.use_ollama:
                 answer = _classify_ollama(
                     prompt, img_b64, config.model, config.ollama_base_url
@@ -186,7 +196,9 @@ def create_classification_tools(db: "DatabaseManager", config: "Config") -> list
                 answer = _classify_openai(
                     prompt, img_b64, config.openai_api_key, config.openai_model
                 )
-            log.info("Page %s classified: %s", page_id, answer)
+            log.info(
+                "[classify] OUTPUT page=%s → %s", page_id, answer
+            )
             return answer
         except Exception as e:
             log.warning("Classification failed for page %s: %s", page_id, e)
