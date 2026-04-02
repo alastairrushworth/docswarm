@@ -1,27 +1,20 @@
-"""LangGraph multi-agent swarm for wiki generation."""
+"""Multi-agent swarm for wiki generation from scanned documents."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import AIMessage
 from langchain_core.messages import HumanMessage
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END
-from langgraph.graph import START
-from langgraph.graph import MessagesState
-from langgraph.graph import StateGraph
-from langgraph.prebuilt import create_react_agent
 
 from docswarm.agents.personas import RESEARCHER_PROMPT
 from docswarm.agents.personas import WRITER_PROMPT
-from docswarm.agents.tools.db_tools import create_db_tools
 from docswarm.agents.tools.file_tools import _build_front_matter
-from docswarm.agents.tools.file_tools import create_file_read_tools
 from docswarm.agents.tools.pdf_tools import create_classification_tools
 from docswarm.logger import get_logger
 
@@ -55,33 +48,13 @@ _CANONICAL_TYPES = {
     "idea": "concept",
 }
 
-# Masthead / credits role words — entities whose context is dominated by these
+# Masthead / credits role words — entities whose info is dominated by these
 # are likely staff credits rather than editorial subjects.
 _MASTHEAD_ROLES = {
-    "manager",
-    "director",
-    "editor",
-    "department",
-    "secretary",
-    "photographer",
-    "printer",
-    "typesetter",
-    "publisher",
-    "correspondent",
-    "photographic",
+    "manager", "director", "editor", "department", "secretary",
+    "photographer", "printer", "typesetter", "publisher",
+    "correspondent", "photographic",
 }
-
-# Article block regex used by both the deterministic editor and salvage.
-_ARTICLE_PATTERN = re.compile(
-    r"===\s*ARTICLE:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ARTICLE\s*===",
-    re.DOTALL | re.IGNORECASE,
-)
-
-# Pattern for researcher entity blocks: === ENTITY: Name (type) === ... === END ENTITY ===
-_ENTITY_PATTERN = re.compile(
-    r"===\s*ENTITY:\s*([^\n=]+?)\s*===\s*\n(.*?)===\s*END\s+ENTITY\s*===",
-    re.DOTALL | re.IGNORECASE,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +62,9 @@ _ENTITY_PATTERN = re.compile(
 # ---------------------------------------------------------------------------
 
 
-def _normalize(s: str) -> str:
-    """Lowercase, strip non-alphanumeric characters for fuzzy matching."""
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks that some models emit textually."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def _safe_type(entity_type: str) -> str:
@@ -105,166 +78,12 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
-def _is_masthead_entity(entity: dict) -> bool:
-    """Return True if an entity looks like a masthead credit, not an editorial subject."""
-    context = (entity.get("context_text") or entity.get("context") or "").lower()
-    if len(context.split()) > 20:
-        return False  # substantial context — probably editorial
-    return bool(_MASTHEAD_ROLES & set(context.split()))
-
-
-def _get_page_classification(messages: list) -> str:
-    """Extract the page classification from the classify_page_content tool result.
-
-    Returns one of: "advertisement", "editorial", "mixed", or "unknown".
-    """
-    for msg in messages:
-        if isinstance(msg, ToolMessage) and msg.name == "classify_page_content":
-            content = str(msg.content).lower()
-            if "classification:" in content:
-                after = content.split("classification:", 1)[1].strip()
-                for label in ("advertisement", "editorial", "mixed"):
-                    if after.startswith(label):
-                        return label
-    return "unknown"
-
-
-def _collect_ai_text(messages: list) -> str:
-    """Concatenate all AIMessage content into a single string."""
-    parts = []
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            c = msg.content if isinstance(msg.content, str) else ""
-            if isinstance(msg.content, list):
-                c = " ".join(
-                    b.get("text", "") if isinstance(b, dict) else str(b) for b in msg.content
-                )
-            if c:
-                parts.append(c)
-    return "\n".join(parts)
-
-
-def _extract_entity_blocks(messages: list) -> list[dict]:
-    """Parse === ENTITY: Name (type) === blocks from researcher AI messages.
-
-    Returns:
-        List of dicts with keys: name, entity_type, context.
-    """
-    all_ai_text = _collect_ai_text(messages)
-    entities = []
-    for match in _ENTITY_PATTERN.finditer(all_ai_text):
-        header = match.group(1).strip()
-        body = match.group(2).strip()
-        if not body:
-            continue
-        # Parse "Name (type)" from header
-        type_match = re.match(r"^(.+?)\s*\((\w+)\)\s*$", header)
-        if type_match:
-            name = type_match.group(1).strip()
-            entity_type = type_match.group(2).strip().lower()
-        else:
-            name = header
-            entity_type = "misc"
-        entities.append({
-            "name": name,
-            "entity_type": _safe_type(entity_type),
-            "context": body,
-        })
-    return entities
-
-
-# Fallback pattern: markdown heading like "# Entity Name" or "## Entity Name"
-# followed by body text until the next top-level heading or end of text.
-_MD_HEADING_PATTERN = re.compile(
-    r"^#{1,2}\s+(?:\d+\.\s+)?(.+?)$\n(.*?)(?=^#{1,2}\s|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
-
-# Headings to skip when using fallback parsing
-_SKIP_HEADINGS = {
-    "references", "key facts", "summary", "entities identified",
-    "entities", "notes", "sources", "introduction", "overview",
-    "page analysis", "page summary", "article status",
-    "new articles created", "existing articles", "entities needing articles",
-}
-
-# Regex patterns in headings that indicate meta-content, not real articles
-_META_HEADING_RE = re.compile(
-    r"entit(?:y|ies)|summary|page\s*\d|page\s*analysis|article\s*status|"
-    r"supporting\s*material|new\s*article|existing\s*article",
-    re.IGNORECASE,
-)
-
-
-def _extract_article_blocks(messages: list) -> dict[str, tuple[str, str]]:
-    """Parse === ARTICLE: name === blocks from all AI messages.
-
-    Falls back to markdown heading parsing if no delimited blocks are found.
-
-    Returns:
-        Dict mapping normalized name → (original_title, body).
-    """
-    all_ai_text = _collect_ai_text(messages)
-
-    # Primary: look for explicit delimiters
-    blocks: dict[str, tuple[str, str]] = {}
-    for match in _ARTICLE_PATTERN.finditer(all_ai_text):
-        title = match.group(1).strip()
-        body = match.group(2).strip()
-        if body and "ARTICLE NEEDED" not in body and "entity_id" not in body.lower():
-            blocks[_normalize(title)] = (title, body)
-
-    if blocks:
-        return blocks
-
-    # Fallback: parse markdown headings as article boundaries
-    for match in _MD_HEADING_PATTERN.finditer(all_ai_text):
-        title = match.group(1).strip().strip("*").strip()
-        body = match.group(2).strip()
-        if not body or len(body) < 20:
-            continue
-        if _normalize(title) in _SKIP_HEADINGS:
-            continue
-        if _META_HEADING_RE.search(title):
-            continue
-        if "ARTICLE NEEDED" in body or "entity_id" in body.lower():
-            continue
-        blocks[_normalize(title)] = (title, body)
-
-    if blocks:
-        log.info("No delimited blocks found; extracted %d from markdown headings", len(blocks))
-
-    return blocks
-
-
-def _match_entity_to_article(
-    entity_name: str, article_blocks: dict[str, tuple[str, str]]
-) -> tuple[str, str] | None:
-    """Find the best matching article block for an entity name.
-
-    Tries exact normalized match, then substring containment.
-    Returns (title, body) or None.
-    """
-    norm = _normalize(entity_name)
-    # Exact match
-    if norm in article_blocks:
-        return article_blocks[norm]
-    # Entity name is a substring of an article title
-    for key, val in article_blocks.items():
-        if norm in key or key in norm:
-            return val
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Swarm state
-# ---------------------------------------------------------------------------
-
-
-class SwarmState(MessagesState):
-    """State shared across all nodes in the swarm graph."""
-
-    active_agent: str
+def _is_masthead_entity(info: str) -> bool:
+    """Return True if entity info looks like a masthead credit."""
+    words = info.lower().split()
+    if len(words) > 20:
+        return False  # substantial info — probably editorial
+    return bool(_MASTHEAD_ROLES & set(words))
 
 
 # ---------------------------------------------------------------------------
@@ -273,11 +92,10 @@ class SwarmState(MessagesState):
 
 
 class DocSwarm:
-    """Orchestrates a three-stage pipeline for wiki generation.
+    """Orchestrates a two-stage pipeline for wiki generation.
 
-    * **Researcher** (LLM) – classifies, extracts entities, searches.
-    * **Writer** (LLM) – drafts wiki articles from research.
-    * **Editor** (deterministic Python) – parses writer output, writes files.
+    * **Researcher** (LLM, JSON mode) – classifies page, extracts entity dicts.
+    * **Writer** (LLM) – creates or updates a wiki article per entity.
     """
 
     def __init__(
@@ -292,354 +110,205 @@ class DocSwarm:
 
         if config.use_ollama:
             log.info("Initialising swarm with Ollama model: %s", config.model)
-            self._llm = ChatOllama(
+            self._researcher_llm = ChatOllama(
+                model=config.model,
+                base_url=config.ollama_base_url,
+                format="json",
+                reasoning=False,
+            )
+            self._writer_llm = ChatOllama(
                 model=config.model,
                 base_url=config.ollama_base_url,
                 reasoning=False,
             )
         else:
             log.info("Initialising swarm with OpenAI model: %s", config.openai_model)
-            self._llm = ChatOpenAI(
+            self._researcher_llm = ChatOpenAI(
+                model=config.openai_model,
+                api_key=config.openai_api_key,
+                model_kwargs={"response_format": {"type": "json_object"}},
+            )
+            self._writer_llm = ChatOpenAI(
                 model=config.openai_model,
                 api_key=config.openai_api_key,
             )
 
-        # Build tool lists
-        db_tools = create_db_tools(db)
-        classification_tools = create_classification_tools(
-            db,
-            config=config,
-        )
-        file_read_tools = create_file_read_tools(config.wiki_output_dir)
-
-        def _pick(tools: list, *names: str) -> list:
-            name_set = set(names)
-            return [t for t in tools if t.name in name_set]
-
-        research_tools = classification_tools
-        writer_tools = (
-            _pick(db_tools, "search_chunks", "get_page_text")
-            + _pick(file_read_tools, "search_article_files", "read_article_file")
-        )
-
-        for agent_name, tools in [
-            ("researcher", research_tools),
-            ("writer", writer_tools),
-        ]:
-            names = [t.name for t in tools]
-            log.info("  %s (%d tools): %s", agent_name, len(names), ", ".join(names))
-        log.info("  editor (deterministic, no LLM)")
-
-        self._researcher = create_react_agent(
-            self._llm,
-            tools=research_tools,
-            prompt=RESEARCHER_PROMPT,
-        )
-        self._writer = create_react_agent(
-            self._llm,
-            tools=writer_tools,
-            prompt=WRITER_PROMPT,
-        )
-
-        self._graph = self.build_graph()
+        # Classification tool — called directly, not through an agent
+        classification_tools = create_classification_tools(db, config=config)
+        self._classify_tool = classification_tools[0]
 
     # ------------------------------------------------------------------
-    # Graph construction
+    # Classification
     # ------------------------------------------------------------------
 
-    def build_graph(self) -> StateGraph:
-        builder = StateGraph(SwarmState)
-        builder.add_node("researcher", self._run_researcher)
-        builder.add_node("writer", self._run_writer)
-        builder.add_node("editor", self._run_editor)
+    def _classify(self, page_id: str) -> str:
+        """Classify a page as advertisement/editorial/mixed."""
+        result = self._classify_tool.invoke({"page_id": page_id})
+        log.info("[classify] page=%s → %s", page_id, result)
+        content = str(result).lower()
+        if "classification:" in content:
+            after = content.split("classification:", 1)[1].strip()
+            for label in ("advertisement", "editorial", "mixed"):
+                if after.startswith(label):
+                    return label
+        return "unknown"
 
-        builder.add_edge(START, "researcher")
-        builder.add_conditional_edges(
-            "researcher",
-            self._route_from_researcher,
-            {"writer": "writer", END: END},
+    # ------------------------------------------------------------------
+    # Researcher
+    # ------------------------------------------------------------------
+
+    def _research(self, raw_text: str, doc_title: str, page_number: str) -> list[dict]:
+        """Call the researcher LLM in JSON mode to extract entities."""
+        user_content = (
+            f"Document: {doc_title}\n"
+            f"Page: {page_number}\n\n"
+            f"--- PAGE TEXT ---\n{raw_text}\n--- END PAGE TEXT ---"
         )
-        builder.add_edge("writer", "editor")
-        builder.add_edge("editor", END)
+        messages = [
+            SystemMessage(content=RESEARCHER_PROMPT),
+            HumanMessage(content=user_content),
+        ]
+        log.debug("[researcher] INPUT: %d chars of page text", len(raw_text))
+        response = self._researcher_llm.invoke(messages)
+        log.debug("[researcher] OUTPUT: %s", str(response.content)[:500])
 
-        return builder.compile()
+        try:
+            data = json.loads(response.content)
+            entities = data.get("entities", []) if isinstance(data, dict) else data
+            if not isinstance(entities, list):
+                log.warning("[researcher] expected list, got %s", type(entities).__name__)
+                return []
+            return entities
+        except (json.JSONDecodeError, TypeError) as e:
+            log.warning("[researcher] failed to parse JSON: %s — %s", e, str(response.content)[:200])
+            return []
 
     # ------------------------------------------------------------------
-    # Node implementations
+    # Writer
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _log_input_messages(agent_name: str, messages: list) -> None:
-        """Log the messages being sent as input to an LLM agent."""
-        log.debug("[%s] INPUT: %d message(s)", agent_name, len(messages))
-        for i, msg in enumerate(messages):
-            msg_type = type(msg).__name__
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            preview = content[:500].replace("\n", " ↵ ")
-            log.debug("[%s] INPUT[%d] %s → %s", agent_name, i, msg_type, preview)
+    def _write_entity(
+        self,
+        entity: dict,
+        doc_title: str,
+        page_number: str,
+        page_id: str,
+    ) -> str | None:
+        """Write or update a wiki article for a single entity. Returns the file path or None."""
+        name = entity.get("entity", "").strip()
+        entity_type = _safe_type(entity.get("type", "misc"))
+        info = entity.get("info", "").strip()
+        source = entity.get("source", f'"{doc_title}", p.{page_number}')
 
-    @staticmethod
-    def _log_new_messages(agent_name: str, old_count: int, messages: list) -> None:
-        for msg in messages[old_count:]:
-            if isinstance(msg, AIMessage):
-                text = msg.content
-                if isinstance(text, list):
-                    text = " ".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b) for b in text
-                    )
-                if text:
-                    preview = text[:500].replace("\n", " ↵ ")
-                    log.debug("[%s] LLM → %s", agent_name, preview)
-                for tc in getattr(msg, "tool_calls", []) or []:
-                    log.debug(
-                        "[%s] TOOL CALL → %s(%s)",
-                        agent_name,
-                        tc.get("name", "?"),
-                        ", ".join(f"{k}={v!r}" for k, v in list(tc.get("args", {}).items())[:3]),
-                    )
-            elif isinstance(msg, ToolMessage):
-                preview = str(msg.content)[:300].replace("\n", " ↵ ")
-                log.debug("[%s] TOOL RESULT (%s) → %s", agent_name, msg.name, preview)
+        if not name or not info:
+            return None
 
-    def _run_researcher(self, state: SwarmState) -> dict:
-        log.info("[researcher] starting")
-        self._log_input_messages("researcher", state["messages"])
-        old_count = len(state["messages"])
-        result = self._researcher.invoke({"messages": state["messages"]})
-        self._log_new_messages("researcher", old_count, result["messages"])
-        log.info("[researcher] done (%d messages)", len(result["messages"]))
-        return {"messages": result["messages"], "active_agent": "researcher"}
+        if _is_masthead_entity(info):
+            log.debug("[writer] skipping masthead entity: %s", name)
+            return None
 
-    def _run_writer(self, state: SwarmState) -> dict:
-        log.info("[writer] starting")
-        self._log_input_messages("writer", state["messages"])
-        old_count = len(state["messages"])
-        result = self._writer.invoke({"messages": state["messages"]})
-        self._log_new_messages("writer", old_count, result["messages"])
-        log.info("[writer] done (%d messages)", len(result["messages"]))
-        return {"messages": result["messages"], "active_agent": "writer"}
-
-    def _run_editor(self, state: SwarmState) -> dict:
-        """Deterministic editor: parse writer output and write article files.
-
-        No LLM call — this is pure Python.
-        """
-        log.info("[editor] starting")
-        messages = state["messages"]
-
-        # Extract page_id from the initial human message
-        page_id = ""
-        doc_title = ""
-        page_number = "?"
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                content = str(msg.content)
-                m = re.search(r"Page ID:\s*(\S+)", content)
-                if m:
-                    page_id = m.group(1)
-                m = re.search(r"Document:\s*(.+)", content)
-                if m:
-                    doc_title = m.group(1).strip()
-                m = re.search(r"Page:\s*(\S+)", content)
-                if m:
-                    page_number = m.group(1)
-                break
-
-        # Parse article blocks from writer output
-        article_blocks = _extract_article_blocks(messages)
-        log.info("[editor] found %d article block(s) from writer", len(article_blocks))
-        if not article_blocks:
-            for msg in reversed(messages):
-                if isinstance(msg, AIMessage):
-                    raw = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    log.debug("[editor] last writer AI text: %s", raw[:800].replace("\n", " ↵ "))
-                    break
-
-        # Parse entity blocks from researcher output
-        entity_blocks = _extract_entity_blocks(messages)
-        log.info("[editor] found %d entity block(s) from researcher", len(entity_blocks))
+        slug = _safe_name(name)
+        if not slug:
+            return None
 
         root = Path(self.config.wiki_output_dir)
-        written_paths = []
-        matched_blocks = set()
+        file_path = root / entity_type / (slug + ".md")
 
-        # Phase 1: Write articles for researcher entities with matching writer output
-        for entity in entity_blocks:
-            name = entity["name"]
-            entity_type = entity["entity_type"]
-            context = entity["context"]
-            slug = _safe_name(name)
-            if not slug:
-                continue
+        # Read existing article if present
+        existing_content = ""
+        if file_path.exists():
+            existing_content = file_path.read_text(encoding="utf-8")
+            # Strip front matter for the LLM — we regenerate it
+            if existing_content.startswith("---"):
+                parts = existing_content.split("---", 2)
+                if len(parts) >= 3:
+                    existing_content = parts[2].strip()
 
-            if _is_masthead_entity(entity):
-                log.debug("[editor] skipping masthead entity: %s", name)
-                continue
-
-            etype = _safe_type(entity_type)
-            file_path = root / etype / (slug + ".md")
-
-            match = _match_entity_to_article(name, article_blocks)
-            if match:
-                title, body = match
-                matched_blocks.add(_normalize(title))
-            elif file_path.exists():
-                # No writer output and file already exists — nothing to do
-                log.debug("[editor] article already exists, no update: %s", file_path)
-                continue
-            else:
-                # Stub from researcher context
-                body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
-                if context:
-                    body += f"\n{context}\n"
-                body += f'\n## References\n\n1. "{doc_title}", p.{page_number}\n'
-
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "title": name,
-                "description": f"{name} — {entity_type}",
-                "entity_type": entity_type,
-                "source_page_id": page_id,
-                "wiki_page_id": None,
-            }
-            file_path.write_text(_build_front_matter(meta) + body, encoding="utf-8")
-            log.info("[editor] wrote article → %s", file_path)
-            written_paths.append(str(file_path))
-
-        # Phase 2: Write any unmatched writer article blocks
-        for norm_key, (title, body) in article_blocks.items():
-            if norm_key in matched_blocks:
-                continue
-            slug = _safe_name(title)
-            if not slug:
-                continue
-            if _META_HEADING_RE.search(title):
-                log.debug("[editor] skipping meta-content block: %s", title)
-                continue
-            # Infer type from body text, default to "person"
-            etype = ""
-            for label in ("organisation", "place", "event", "object", "concept"):
-                if label in body.lower()[:300]:
-                    etype = label
-                    break
-            if not etype:
-                etype = "person"
-            file_path = root / etype / (slug + ".md")
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "title": title,
-                "description": title,
-                "entity_type": etype,
-                "source_page_id": page_id,
-                "wiki_page_id": None,
-            }
-            file_path.write_text(_build_front_matter(meta) + body, encoding="utf-8")
-            log.info("[editor] wrote unmatched article → %s", file_path)
-            written_paths.append(str(file_path))
-
-        summary = (
-            f"Article written to: {', '.join(written_paths)}"
-            if written_paths
-            else "No articles written."
+        # Build writer input
+        user_content = (
+            f"Entity: {name}\n"
+            f"Type: {entity_type}\n"
+            f"New information: {info}\n"
+            f"Source: {source}\n"
         )
-        log.info("[editor] done — wrote %d article(s)", len(written_paths))
+        if existing_content:
+            user_content += f"\nExisting article:\n{existing_content}"
 
-        new_messages = list(messages) + [AIMessage(content=summary)]
-        return {"messages": new_messages, "active_agent": "editor"}
+        messages = [
+            SystemMessage(content=WRITER_PROMPT),
+            HumanMessage(content=user_content),
+        ]
+        log.debug("[writer] INPUT entity=%s existing=%d chars", name, len(existing_content))
+        response = self._writer_llm.invoke(messages)
+        article_body = response.content.strip()
+        log.debug("[writer] OUTPUT: %s", article_body[:300])
 
-    # ------------------------------------------------------------------
-    # Routing
-    # ------------------------------------------------------------------
+        if not article_body:
+            return None
 
-    @staticmethod
-    def _strip_think_tags(text: str) -> str:
-        """Remove <think>...</think> blocks that some models emit textually."""
-        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-    def _route_from_researcher(self, state: SwarmState) -> str:
-        """Skip the pipeline only for pages classified as 'advertisement'.
-
-        Uses the classify_page_content tool result directly, not the LLM's
-        prose interpretation, to avoid false positives on mixed pages.
-        """
-        messages = state.get("messages", [])
-        classification = _get_page_classification(messages)
-        if classification == "advertisement":
-            log.info("Page classified as advertisement — skipping pipeline")
-            return END
-        log.info("Page classified as %s — proceeding", classification)
-        return "writer"
+        # Write to disk
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "title": name,
+            "description": f"{name} — {entity_type}",
+            "entity_type": entity_type,
+            "source_page_id": page_id,
+            "wiki_page_id": None,
+        }
+        file_path.write_text(_build_front_matter(meta) + article_body + "\n", encoding="utf-8")
+        action = "updated" if existing_content else "created"
+        log.info("[writer] %s article → %s", action, file_path)
+        return str(file_path)
 
     # ------------------------------------------------------------------
     # Public run API
     # ------------------------------------------------------------------
 
-    def run(self, topic: str) -> dict:
-        log.info("Starting swarm for topic: %s", topic)
-        initial_message = HumanMessage(
-            content=(
-                f"Please research the following topic from the source documents "
-                f"and produce a comprehensive wiki article: {topic}\n\n"
-                f"Start by searching the database for relevant passages."
-            )
-        )
-        initial_state: SwarmState = {
-            "messages": [initial_message],
-            "active_agent": "researcher",
-        }
-        result = self._graph.invoke(initial_state)
-        log.info(
-            "Swarm complete for topic: %s (%d messages)", topic, len(result.get("messages", []))
-        )
-        return result
-
     def run_for_page(self, page: dict) -> dict:
+        """Process a single page: classify, research, write articles."""
         page_id = page["id"]
-        page_number = page.get("page_number", "?")
+        page_number = str(page.get("page_number", "?"))
         raw_text = page.get("raw_text") or ""
 
         doc = self.db.get_document(page["document_id"])
         doc_title = doc.get("title", page["document_id"]) if doc else page["document_id"]
 
-        log.info("Starting swarm for page_id=%s (%s p.%s)", page_id, doc_title, page_number)
+        log.info("Processing page_id=%s (%s p.%s)", page_id, doc_title, page_number)
 
-        initial_message = HumanMessage(
-            content=(
-                f"Below is a source page from a scanned magazine/book. Your job is to "
-                f"identify the distinct entities (people, organisations, events, places, "
-                f"objects, concepts) mentioned on this page and produce a SEPARATE focused "
-                f"wiki article for each one. Articles must be about specific subjects, "
-                f"NOT about the magazine page itself.\n\n"
-                f"Document: {doc_title}\n"
-                f"Page: {page_number}\n"
-                f"Page ID: {page_id}\n\n"
-                f"--- PAGE TEXT ---\n{raw_text}\n--- END PAGE TEXT ---\n\n"
-                f"Use search tools to find supporting material from other pages."
+        # 1. Classify
+        classification = self._classify(page_id)
+        if classification == "advertisement":
+            log.info("Page classified as advertisement — skipping")
+            self.db.log_page_study(
+                page_id=page_id,
+                document_id=page["document_id"],
+                wiki_article_path="",
             )
-        )
-        initial_state: SwarmState = {
-            "messages": [initial_message],
-            "active_agent": "researcher",
-        }
-        result = self._graph.invoke(initial_state)
-        messages = result.get("messages", [])
-        log.info("Swarm complete for page_id=%s (%d messages)", page_id, len(messages))
+            return {"skipped": True, "reason": "advertisement"}
 
-        # Determine article path from editor output
-        article_path = ""
-        for msg in reversed(messages):
-            if isinstance(msg, AIMessage) and "Article written to:" in str(msg.content):
-                article_path = str(msg.content).replace("Article written to: ", "")
-                break
+        log.info("Page classified as %s — extracting entities", classification)
 
+        # 2. Research — extract entities as JSON
+        entities = self._research(raw_text, doc_title, page_number)
+        log.info("Researcher found %d entity(ies)", len(entities))
+
+        # 3. Write/update article for each entity
+        written_paths = []
+        for entity in entities:
+            path = self._write_entity(entity, doc_title, page_number, page_id)
+            if path:
+                written_paths.append(path)
+
+        log.info("Wrote %d article(s) for page %s", len(written_paths), page_id)
         self.db.log_page_study(
             page_id=page_id,
             document_id=page["document_id"],
-            wiki_article_path=article_path,
+            wiki_article_path=", ".join(written_paths),
         )
-        return result
+        return {"written": written_paths}
 
     def run_full_wiki_generation(self) -> list[dict]:
+        """Process all unstudied pages."""
         results = []
         while True:
             page = self.db.get_next_unstudied_page()

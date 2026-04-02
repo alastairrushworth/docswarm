@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from docswarm.agents.swarm import DocSwarm
+from docswarm.agents.swarm import _strip_think_tags
 
 # ---------------------------------------------------------------------------
 # ChatOllama (used by the swarm LLM)
@@ -29,11 +30,12 @@ class TestChatOllamaThinkDisabled:
         with patch("docswarm.agents.swarm.ChatOllama", return_value=mock_llm) as mock_cls:
             DocSwarm(config=tmp_config, db=db, wiki_client=wiki_client)
 
-        mock_cls.assert_called_once()
-        call_kwargs = mock_cls.call_args
-        assert (
-            call_kwargs.kwargs.get("reasoning") is False
-        ), f"ChatOllama must be created with reasoning=False, got: {call_kwargs.kwargs}"
+        # ChatOllama is called twice (researcher + writer), both with reasoning=False
+        assert mock_cls.call_count == 2
+        for call in mock_cls.call_args_list:
+            assert (
+                call.kwargs.get("reasoning") is False
+            ), f"ChatOllama must be created with reasoning=False, got: {call.kwargs}"
 
     def test_reasoning_maps_to_think_false_in_api_params(self):
         """Verify that langchain_ollama maps reasoning=False to think=False
@@ -201,4 +203,4 @@ class TestStripThinkTags:
         ],
     )
     def test_strip_think_tags(self, input_text, expected):
-        assert DocSwarm._strip_think_tags(input_text) == expected
+        assert _strip_think_tags(input_text) == expected
