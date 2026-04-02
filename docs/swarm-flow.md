@@ -26,15 +26,11 @@ flowchart TD
         R_SAVE --> R_CHECK["5. Check existing<br/>wiki articles"]
 
         subgraph R_TOOLS["Researcher Tools (8)"]
-            direction LR
-            RT1["classify_page_content<br/><i>multimodal vision call</i>"]
-            RT2["search_chunks"]
-            RT3["get_page_text"]
-            RT4["list_documents"]
-            RT5["save_entity"]
-            RT6["search_entities"]
-            RT7["get_entities_for_page"]
-            RT8["search_article_files"]
+            direction TB
+            RT_VISION["classify_page_content<br/><i>multimodal vision LLM call</i>"]
+            RT_DB["search_chunks &middot; get_page_text &middot; list_documents<br/><i>DuckDB read queries</i>"]
+            RT_ENTITY["save_entity &middot; search_entities &middot; get_entities_for_page<br/><i>entity table read/write</i>"]
+            RT_FILES["search_article_files<br/><i>wiki filesystem search</i>"]
         end
     end
 
@@ -51,11 +47,9 @@ flowchart TD
         W_SEARCH --> W_DRAFT["3. Draft wiki articles<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
 
         subgraph W_TOOLS["Writer Tools (4)"]
-            direction LR
-            WT1["search_chunks"]
-            WT2["get_page_text"]
-            WT3["read_article_file"]
-            WT4["search_article_files"]
+            direction TB
+            WT_DB["search_chunks &middot; get_page_text<br/><i>DuckDB read queries</i>"]
+            WT_FILES["read_article_file &middot; search_article_files<br/><i>wiki filesystem read/search</i>"]
         end
     end
 
@@ -84,7 +78,7 @@ flowchart TD
 
     %% Data flow connections
     DB -.->|"chunks, pages,<br/>entities"| R_TOOLS
-    PDF -.->|"page image<br/>(base64)"| RT1
+    PDF -.->|"page image<br/>(base64)"| RT_VISION
     DB -.->|"chunks, pages"| W_TOOLS
     LLM_BACKEND -.->|"USE_OLLAMA<br/>env var"| RESEARCHER
     LLM_BACKEND -.->|"USE_OLLAMA<br/>env var"| WRITER
@@ -99,7 +93,7 @@ flowchart TD
     class R,R_CLASSIFY,R_EXTRACT,R_SEARCH,R_SAVE,R_CHECK agent
     class W,W_READ,W_SEARCH,W_DRAFT agent
     class E,E_PARSE,E_FILTER,E_MATCH,E_PHASE1,E_PHASE2,E_STUB deterministic
-    class RT1,RT2,RT3,RT4,RT5,RT6,RT7,RT8,WT1,WT2,WT3,WT4 tool
+    class RT_VISION,RT_DB,RT_ENTITY,RT_FILES,WT_DB,WT_FILES tool
     class DB,PDF,WIKI data
     class ROUTE decision
 ```
