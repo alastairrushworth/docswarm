@@ -2,9 +2,10 @@
 
 ```mermaid
 flowchart TD
-    subgraph INPUT["Input"]
+    subgraph KEY["Data Sources (colour key)"]
+        direction LR
         DB[(DuckDB/DuckLake<br/>documents, pages,<br/>chunks, entities)]
-        PDF["Scanned PDF Pages<br/>(page images + OCR text)"]
+        PDF["Scanned PDF Pages<br/>(images + OCR text)"]
         WIKI_IN["wiki/*.md<br/>(existing articles)"]
     end
 
@@ -30,11 +31,11 @@ flowchart TD
         RT_ENTITY["save_entity &middot; search_entities<br/>&middot; get_entities_for_page"]
         RT_FILES["search_article_files"]
 
-        R_CLASSIFY -.-> RT_VISION
-        R_EXTRACT -.-> RT_DB
-        R_SEARCH -.-> RT_DB
-        R_SAVE -.-> RT_ENTITY
-        R_CHECK -.-> RT_FILES
+        R_CLASSIFY <==> RT_VISION
+        R_EXTRACT <==> RT_DB
+        R_SEARCH <==> RT_DB
+        R_SAVE <==> RT_ENTITY
+        R_CHECK <==> RT_FILES
     end
 
     R_CHECK --> ROUTE{"Route:<br/>page classification?"}
@@ -51,9 +52,9 @@ flowchart TD
         WT_DB["search_chunks &middot; get_page_text"]
         WT_FILES["read_article_file<br/>&middot; search_article_files"]
 
-        W_READ -.-> WT_DB
-        W_SEARCH -.-> WT_DB
-        W_SEARCH -.-> WT_FILES
+        W_READ <==> WT_DB
+        W_SEARCH <==> WT_DB
+        W_SEARCH <==> WT_FILES
     end
 
     W_DRAFT --> E
@@ -77,37 +78,26 @@ flowchart TD
     LLM_BACKEND -.->|"USE_OLLAMA"| WRITER
 
     %% Styling
-    %% Agent steps: blue
     classDef agent fill:#4a90d9,stroke:#2c5f8a,color:#fff
-    %% Editor steps: green
     classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
-    %% Decision: purple
     classDef decision fill:#9b59b6,stroke:#7d3c98,color:#fff
 
-    %% Tool colours by data source:
-    %%   Orange = reads from DuckDB
-    %%   Red-pink = reads from PDF/page images
-    %%   Teal = reads/writes wiki filesystem
-    classDef toolDb fill:#f0ad4e,stroke:#c77f1a,color:#000
-    classDef toolPdf fill:#e74c3c,stroke:#c0392b,color:#fff
-    classDef toolWiki fill:#1abc9c,stroke:#16a085,color:#fff
-    %% Mixed: DuckDB + PDF (striped not possible, so split border)
-    classDef toolMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
+    %% Data source colours — match key nodes to their tool nodes
+    classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
+    classDef srcPdf fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
+    classDef srcMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
 
     class R,R_CLASSIFY,R_EXTRACT,R_SEARCH,R_SAVE,R_CHECK agent
     class W,W_READ,W_SEARCH,W_DRAFT agent
     class E,E_PARSE,E_FILTER,E_MATCH,E_WRITE deterministic
     class ROUTE decision
 
-    class RT_DB,RT_ENTITY,WT_DB toolDb
-    class RT_VISION toolMixed
-    class RT_FILES,WT_FILES,WIKI_IN toolWiki
+    class DB,RT_DB,RT_ENTITY,WT_DB srcDb
+    class PDF srcPdf
+    class RT_VISION srcMixed
+    class WIKI_IN,RT_FILES,WT_FILES srcWiki
 ```
-
-**Tool colour key** — coloured by data source:
-- **Orange** = DuckDB (chunks, pages, entities)
-- **Red** = PDF page images (with orange border = also uses DuckDB for page lookup)
-- **Teal** = Wiki filesystem
 
 ## Pipeline Summary
 
