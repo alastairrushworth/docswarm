@@ -61,7 +61,7 @@ flowchart LR
 
 ## Researcher (detail)
 
-The researcher runs as a **single ReAct LLM invoke()** — the LLM autonomously decides which tools to call and in what order. The steps below are the typical sequence.
+The researcher runs as a **single ReAct LLM invoke()** — the LLM autonomously decides which tools to call and in what order. Its job is to gather encyclopedia-ready information for the Writer. It does **not** write to the database — all output is in the message stream.
 
 ```mermaid
 flowchart LR
@@ -71,24 +71,22 @@ flowchart LR
 
     S1["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> page image + OCR text &rarr; vision LLM<br/><i>Returns:</i> editorial / advertisement / mixed"]
 
-    S1 -->|"advertisement"| OUT_AD["<b>Output:</b> classification only<br/>(LLM stops, no entities)"]
+    S1 -->|"advertisement"| OUT_AD["<b>Output:</b> classification only<br/>(pipeline stops here)"]
     S1 -->|"editorial / mixed"| S2
 
-    S2["<b>2. Read page content</b><br/><i>Tools:</i> get_page_text, search_chunks<br/><i>How:</i> SQL queries on chunks table<br/><i>Returns:</i> full OCR text + relevant chunks"]
+    S2["<b>2. Read page &amp; identify subjects</b><br/><i>How:</i> LLM reads OCR text, picks out<br/>notable people, places, organisations,<br/>events, objects, concepts<br/><i>Filters out:</i> masthead staff, generic terms,<br/>ad-only mentions"]
 
-    S2 -->|"page text + chunks"| S3
+    S2 -->|"candidate subjects"| S3
 
-    S3["<b>3. Identify entities</b><br/><i>How:</i> LLM reads text, identifies<br/>people, places, organisations, events,<br/>objects, concepts<br/><i>Returns:</i> candidate entity list with types"]
+    S3["<b>3. Gather facts from corpus</b><br/><i>Tool:</i> search_chunks<br/><i>How:</i> for each subject, search other<br/>pages for additional mentions &amp; facts<br/><i>Returns:</i> all known info per subject"]
 
-    S3 -->|"entity names + types"| S4
+    S3 -->|"research gathered"| S4
 
-    S4["<b>4. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities already<br/>have articles vs need new ones"]
+    S4["<b>4. Check wiki for existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob wiki/*.md<br/><i>Skips:</i> subjects that already have articles"]
 
-    S4 --> S5
+    S4 --> OUT
 
-    S5["<b>5. Output entity blocks</b><br/><i>How:</i> LLM outputs structured<br/>=== ENTITY: Name (type) ===<br/>facts + sources<br/>=== END ENTITY ===<br/><i>Returns:</i> entity:info pairs in messages"]
-
-    S5 --> OUT["<b>Output:</b> messages with classification<br/>+ entity blocks (no DB writes)"]
+    OUT["<b>Output:</b> structured blocks per subject:<br/>=== ENTITY: Name (type) ===<br/>facts + source citations<br/>=== END ENTITY ==="]
 
     %% Styling
     classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
@@ -98,10 +96,9 @@ flowchart LR
     classDef srcStop fill:#999,stroke:#666,color:#fff
 
     class S1 srcMixed
-    class S2 srcDb
-    class S3 srcLlm
+    class S2 srcLlm
+    class S3 srcDb
     class S4 srcWiki
-    class S5 srcLlm
     class OUT_AD srcStop
 ```
 
