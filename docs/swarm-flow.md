@@ -9,6 +9,7 @@ flowchart TD
         WIKI_IN["wiki/*.md<br/>(existing articles)"]
     end
 
+    KEY ~~~ START
     START((Start)) --> NEXT["get_next_unstudied_page()"]
     NEXT -->|"page dict<br/>(id, raw_text, image_path)"| R
 
@@ -20,52 +21,52 @@ flowchart TD
 
     subgraph RESEARCHER["Researcher Agent (LLM)"]
         R["Receive page text + metadata"]
-        R --> R_CLASSIFY["1. Classify page"]
-        R_CLASSIFY --> R_EXTRACT["2. Extract entities"]
-        R_EXTRACT --> R_SEARCH["3. Search for<br/>supporting material"]
-        R_SEARCH --> R_SAVE["4. Save entities<br/>to database"]
-        R_SAVE --> R_CHECK["5. Check existing<br/>wiki articles"]
+        R -->|"LLM decides<br/>next action"| R_CLASSIFY["1. Classify page"]
+        R_CLASSIFY -->|"LLM reasoning"| R_EXTRACT["2. Extract entities"]
+        R_EXTRACT -->|"LLM reasoning"| R_SEARCH["3. Search for<br/>supporting material"]
+        R_SEARCH -->|"LLM reasoning"| R_SAVE["4. Save entities<br/>to database"]
+        R_SAVE -->|"LLM reasoning"| R_CHECK["5. Check existing<br/>wiki articles"]
 
         RT_VISION["classify_page_content<br/><i>multimodal vision LLM</i>"]
         RT_DB["search_chunks &middot; get_page_text<br/>&middot; list_documents"]
         RT_ENTITY["save_entity &middot; search_entities<br/>&middot; get_entities_for_page"]
         RT_FILES["search_article_files"]
 
-        R_CLASSIFY <==> RT_VISION
-        R_EXTRACT <==> RT_DB
-        R_SEARCH <==> RT_DB
-        R_SAVE <==> RT_ENTITY
-        R_CHECK <==> RT_FILES
+        R_CLASSIFY <==>|"tool use:<br/>vision LLM call"| RT_VISION
+        R_EXTRACT <==>|"tool use:<br/>SQL query"| RT_DB
+        R_SEARCH <==>|"tool use:<br/>SQL query"| RT_DB
+        R_SAVE <==>|"tool use:<br/>SQL insert"| RT_ENTITY
+        R_CHECK <==>|"tool use:<br/>glob + read"| RT_FILES
     end
 
-    R_CHECK --> ROUTE{"Route:<br/>page classification?"}
+    R_CHECK -->|"read ToolMessage"| ROUTE{"Route:<br/>page classification?"}
     ROUTE -->|"advertisement"| SKIP["Skip page"]
     SKIP --> MARK
     ROUTE -->|"editorial / mixed"| W
 
     subgraph WRITER["Writer Agent (LLM)"]
         W["Receive researcher<br/>messages + entities"]
-        W --> W_READ["1. Read source chunks"]
-        W_READ --> W_SEARCH["2. Search for<br/>additional context"]
-        W_SEARCH --> W_DRAFT["3. Draft wiki articles<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
+        W -->|"LLM decides<br/>next action"| W_READ["1. Read source chunks"]
+        W_READ -->|"LLM reasoning"| W_SEARCH["2. Search for<br/>additional context"]
+        W_SEARCH -->|"LLM generates<br/>article text"| W_DRAFT["3. Draft wiki articles<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
 
         WT_DB["search_chunks &middot; get_page_text"]
         WT_FILES["read_article_file<br/>&middot; search_article_files"]
 
-        W_READ <==> WT_DB
-        W_SEARCH <==> WT_DB
-        W_SEARCH <==> WT_FILES
+        W_READ <==>|"tool use:<br/>SQL query"| WT_DB
+        W_SEARCH <==>|"tool use:<br/>SQL query"| WT_DB
+        W_SEARCH <==>|"tool use:<br/>glob + read"| WT_FILES
     end
 
-    W_DRAFT --> E
+    W_DRAFT -->|"pass all messages"| E
 
     subgraph EDITOR["Editor (Deterministic Python -- no LLM)"]
         direction TB
         E["Receive all messages"]
-        E --> E_PARSE["1. Parse article blocks<br/><i>primary: === delimiters</i><br/><i>fallback: markdown headings</i>"]
-        E_PARSE --> E_FILTER["2. Filter meta-content<br/>& masthead entities"]
-        E_FILTER --> E_MATCH["3. Match entities to articles<br/><i>(fuzzy name matching)</i>"]
-        E_MATCH --> E_WRITE["4. Write markdown files<br/><i>a) matched entities</i><br/><i>b) unmatched blocks</i><br/><i>c) stubs for remainder</i>"]
+        E -->|"regex parse"| E_PARSE["1. Parse article blocks<br/><i>primary: === delimiters</i><br/><i>fallback: markdown headings</i>"]
+        E_PARSE -->|"regex + set filter"| E_FILTER["2. Filter meta-content<br/>& masthead entities"]
+        E_FILTER -->|"normalize +<br/>substring match"| E_MATCH["3. Match entities to articles<br/><i>(fuzzy name matching)</i>"]
+        E_MATCH -->|"write to disk"| E_WRITE["4. Write markdown files<br/><i>a) matched entities</i><br/><i>b) unmatched blocks</i><br/><i>c) stubs for remainder</i>"]
     end
 
     E_WRITE -->|"new/updated<br/>articles"| WIKI_IN
