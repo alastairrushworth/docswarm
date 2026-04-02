@@ -21,7 +21,7 @@ wiki/
 logs/
 
 # Input documents (large binaries)
-docs/
+pdfs/
 
 # Scratch scripts
 scratch_*.py
