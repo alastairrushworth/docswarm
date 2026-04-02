@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import ToolMessage
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END
 from langgraph.graph import START
 from langgraph.graph import MessagesState
@@ -255,20 +256,26 @@ class DocSwarm:
         self.db = db
         self.wiki_client = wiki_client
 
-        log.info("Initialising swarm with model: %s", config.model)
-        self._llm = ChatOllama(
-            model=config.model,
-            base_url=config.ollama_base_url,
-            reasoning=False,
-        )
+        if config.use_ollama:
+            log.info("Initialising swarm with Ollama model: %s", config.model)
+            self._llm = ChatOllama(
+                model=config.model,
+                base_url=config.ollama_base_url,
+                reasoning=False,
+            )
+        else:
+            log.info("Initialising swarm with OpenAI model: %s", config.openai_model)
+            self._llm = ChatOpenAI(
+                model=config.openai_model,
+                api_key=config.openai_api_key,
+            )
 
         # Build tool lists
         db_tools = create_db_tools(db)
         entity_tools = create_entity_tools(db)
         classification_tools = create_classification_tools(
             db,
-            model=config.model,
-            ollama_base_url=config.ollama_base_url,
+            config=config,
         )
         file_read_tools = create_file_read_tools(config.wiki_output_dir)
 
@@ -475,12 +482,18 @@ class DocSwarm:
             if _META_HEADING_RE.search(title):
                 log.debug("[editor] skipping meta-content block: %s", title)
                 continue
-            # Infer type from content or default to "misc"
-            etype = "misc"
-            for label in ("person", "organisation", "place", "event", "object", "concept"):
-                if label in body.lower()[:200]:
-                    etype = label
-                    break
+            # Infer type: check DB first, then scan body text, default to "person"
+            etype = ""
+            db_entity = self.db.get_entity_by_name(title) if self.db else None
+            if db_entity:
+                etype = _safe_type(db_entity.get("entity_type", ""))
+            if not etype:
+                for label in ("organisation", "place", "event", "object", "concept"):
+                    if label in body.lower()[:300]:
+                        etype = label
+                        break
+            if not etype:
+                etype = "person"
             path = f"{etype}/{slug}"
             file_path = root / (path + ".md")
             if file_path.exists():

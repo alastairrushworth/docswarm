@@ -26,6 +26,9 @@ class Config:
     chunk_size: int = 800
     chunk_overlap: int = 100
     model: str = "gemma3:4b"
+    use_ollama: bool = True
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.4-nano"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -61,4 +64,7 @@ class Config:
             chunk_size=int(os.environ.get("DOCSWARM_CHUNK_SIZE", "800")),
             chunk_overlap=int(os.environ.get("DOCSWARM_CHUNK_OVERLAP", "100")),
             model=os.environ.get("DOCSWARM_MODEL", "gemma3:4b"),
+            use_ollama=os.environ.get("USE_OLLAMA", "true").lower() in ("true", "1", "yes"),
+            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+            openai_model=os.environ.get("DOCSWARM_OPENAI_MODEL", "gpt-5.4-nano"),
         )

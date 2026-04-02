@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 from docswarm.logger import get_logger
 
 if TYPE_CHECKING:
+    from docswarm.config import Config
     from docswarm.storage.database import DatabaseManager
 
 log = get_logger(__name__)
@@ -118,17 +119,17 @@ def create_pdf_tools(db: "DatabaseManager") -> list:
     return [get_page_image_info, get_source_reference]
 
 
-def create_classification_tools(db: "DatabaseManager", model: str, ollama_base_url: str) -> list:
+def create_classification_tools(db: "DatabaseManager", config: "Config") -> list:
     """Create tools for classifying page content using multimodal LLM.
 
     Args:
         db: An initialised :class:`~docswarm.storage.database.DatabaseManager`.
-        model: Ollama model name (must support vision).
-        ollama_base_url: Ollama server URL.
+        config: Application configuration (determines Ollama vs OpenAI).
 
     Returns:
         List of LangChain tool callables.
     """
+    from docswarm.config import Config  # noqa: F811
 
     @tool
     def classify_page_content(page_id: str) -> str:
@@ -162,7 +163,6 @@ def create_classification_tools(db: "DatabaseManager", model: str, ollama_base_u
 
         img_b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
 
-        # Build the multimodal classification request
         prompt = (
             "Look at this scanned magazine/book page and classify it.\n\n"
             "Is this page primarily:\n"
@@ -177,26 +177,15 @@ def create_classification_tools(db: "DatabaseManager", model: str, ollama_base_u
             "CLASSIFICATION: <advertisement|editorial|mixed> — <one sentence reason>"
         )
 
-        payload = json.dumps(
-            {
-                "model": model,
-                "prompt": prompt,
-                "images": [img_b64],
-                "stream": False,
-                "options": {"num_predict": 80},
-                "think": False,
-            }
-        ).encode()
-
         try:
-            req = urllib.request.Request(
-                f"{ollama_base_url}/api/generate",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read())
-            answer = result.get("response", "").strip()
+            if config.use_ollama:
+                answer = _classify_ollama(
+                    prompt, img_b64, config.model, config.ollama_base_url
+                )
+            else:
+                answer = _classify_openai(
+                    prompt, img_b64, config.openai_api_key, config.openai_model
+                )
             log.info("Page %s classified: %s", page_id, answer)
             return answer
         except Exception as e:
@@ -204,3 +193,51 @@ def create_classification_tools(db: "DatabaseManager", model: str, ollama_base_u
             return f"Classification failed: {e}. Treat as editorial and proceed."
 
     return [classify_page_content]
+
+
+def _classify_ollama(prompt: str, img_b64: str, model: str, base_url: str) -> str:
+    """Classify a page image using the Ollama /api/generate endpoint."""
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "images": [img_b64],
+            "stream": False,
+            "options": {"num_predict": 80},
+            "think": False,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        f"{base_url}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        result = json.loads(resp.read())
+    return result.get("response", "").strip()
+
+
+def _classify_openai(prompt: str, img_b64: str, api_key: str, model: str) -> str:
+    """Classify a page image using the OpenAI chat completions API."""
+    import openai
+
+    client = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model,
+        max_completion_tokens=100,
+        reasoning_effort="none",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    },
+                ],
+            }
+        ],
+    )
+    return response.choices[0].message.content.strip()

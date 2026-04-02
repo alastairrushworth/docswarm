@@ -71,11 +71,10 @@ class TestClassifyPageThinkDisabled:
             [str(img_path), sample_page["id"]],
         )
 
-        tools = create_classification_tools(
-            db,
-            model="test-model",
-            ollama_base_url="http://localhost:11434",
-        )
+        from docswarm.config import Config
+
+        test_config = Config(model="test-model", ollama_base_url="http://localhost:11434")
+        tools = create_classification_tools(db, config=test_config)
         classify_fn = tools[0]
 
         # Mock urlopen to capture the request payload
@@ -95,6 +94,91 @@ class TestClassifyPageThinkDisabled:
         assert (
             payload.get("think") is False
         ), f"Expected think=False in classify payload, got: {payload}"
+
+
+class TestClassifyOpenAI:
+    """Verify _classify_openai calls the OpenAI API correctly."""
+
+    def test_classify_openai_uses_max_completion_tokens(self, db, sample_page, tmp_path):
+        """_classify_openai must use max_completion_tokens, not max_tokens."""
+        from docswarm.agents.tools.pdf_tools import create_classification_tools
+        from docswarm.config import Config
+
+        img_path = tmp_path / "page_0001.png"
+        img_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        db._exec(
+            "UPDATE docswarm.pages SET image_path = ? WHERE id = ?",
+            [str(img_path), sample_page["id"]],
+        )
+
+        test_config = Config(
+            use_ollama=False,
+            openai_api_key="test-key",
+            openai_model="gpt-5.4-nano",
+        )
+        tools = create_classification_tools(db, config=test_config)
+        classify_fn = tools[0]
+
+        mock_message = MagicMock()
+        mock_message.content = "CLASSIFICATION: editorial — test page"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        with patch("openai.OpenAI") as mock_openai_cls:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_openai_cls.return_value = mock_client
+
+            result = classify_fn.invoke({"page_id": sample_page["id"]})
+
+        assert "editorial" in result
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        assert "max_completion_tokens" in call_kwargs
+        assert "max_tokens" not in call_kwargs
+        assert call_kwargs["model"] == "gpt-5.4-nano"
+
+    def test_classify_openai_sends_image(self, db, sample_page, tmp_path):
+        """_classify_openai must include the page image as base64."""
+        from docswarm.agents.tools.pdf_tools import create_classification_tools
+        from docswarm.config import Config
+
+        img_path = tmp_path / "page_0001.png"
+        img_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        db._exec(
+            "UPDATE docswarm.pages SET image_path = ? WHERE id = ?",
+            [str(img_path), sample_page["id"]],
+        )
+
+        test_config = Config(
+            use_ollama=False,
+            openai_api_key="test-key",
+            openai_model="gpt-5.4-nano",
+        )
+        tools = create_classification_tools(db, config=test_config)
+        classify_fn = tools[0]
+
+        mock_message = MagicMock()
+        mock_message.content = "CLASSIFICATION: advertisement — ad page"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        with patch("openai.OpenAI") as mock_openai_cls:
+            mock_client = MagicMock()
+            mock_client.chat.completions.create.return_value = mock_response
+            mock_openai_cls.return_value = mock_client
+
+            classify_fn.invoke({"page_id": sample_page["id"]})
+
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        messages = call_kwargs["messages"]
+        content = messages[0]["content"]
+        image_block = [c for c in content if c.get("type") == "image_url"]
+        assert len(image_block) == 1
+        assert image_block[0]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 # ---------------------------------------------------------------------------
