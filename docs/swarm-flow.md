@@ -14,20 +14,20 @@ flowchart LR
     START((Start)) --> NEXT["get_next_unstudied_page()"]
     NEXT -->|"page dict"| RESEARCHER
 
-    RESEARCHER["<b>Researcher</b><br/><i>ReAct LLM agent</i><br/>5 tools<br/><br/>Classifies page,<br/>gathers entity info,<br/>outputs entity blocks"]
+    RESEARCHER["<b>Researcher</b><br/><i>ReAct LLM agent</i><br/>1 tool<br/><br/>Classifies page,<br/>extracts structured<br/>entity:info:source triples"]
 
     RESEARCHER -->|"all messages"| ROUTE{"Classification?"}
 
     ROUTE -->|"advertisement"| MARK["log_page_study()"]
     ROUTE -->|"editorial / mixed"| WRITER
 
-    WRITER["<b>Writer</b><br/><i>ReAct LLM agent</i><br/>4 tools<br/><br/>Drafts wiki articles<br/>for each entity"]
+    WRITER["<b>Writer</b><br/><i>ReAct LLM agent</i><br/>4 tools<br/><br/>For each entity: checks wiki,<br/>creates or updates article"]
 
     WRITER -->|"all messages"| EDITOR
 
-    EDITOR["<b>Editor</b><br/><i>Deterministic Python</i><br/>no LLM<br/><br/>Parses entity + article blocks<br/>from messages, writes markdown"]
+    EDITOR["<b>Editor</b><br/><i>Deterministic Python</i><br/>no LLM<br/><br/>Parses article blocks,<br/>writes/updates markdown files"]
 
-    EDITOR -->|"new articles"| WIKI_IN
+    EDITOR -->|"new / updated articles"| WIKI_IN
     EDITOR --> MARK
     MARK --> NEXT
     NEXT -->|"no more pages"| DONE((Done))
@@ -61,7 +61,7 @@ flowchart LR
 
 ## Researcher (detail)
 
-The researcher runs as a **single ReAct LLM invoke()** — the LLM autonomously decides which tools to call and in what order. Its job is to gather encyclopedia-ready information for the Writer. It does **not** write to the database — all output is in the message stream.
+The researcher runs as a **single ReAct LLM invoke()**. It has one tool (`classify_page_content`) and the page text is already in the input message. After classification, it reads the page text and outputs structured entity:info:source blocks — no database reads or writes.
 
 ```mermaid
 flowchart LR
@@ -74,31 +74,19 @@ flowchart LR
     S1 -->|"advertisement"| OUT_AD["<b>Output:</b> classification only<br/>(pipeline stops here)"]
     S1 -->|"editorial / mixed"| S2
 
-    S2["<b>2. Read page &amp; identify subjects</b><br/><i>How:</i> LLM reads OCR text, picks out<br/>notable people, places, organisations,<br/>events, objects, concepts<br/><i>Filters out:</i> masthead staff, generic terms,<br/>ad-only mentions"]
+    S2["<b>2. Extract entity information</b><br/><i>How:</i> LLM reads page text (already in input),<br/>outputs one block per notable subject<br/>with encyclopedia-ready info + source ref<br/><i>Filters out:</i> masthead staff, generic terms,<br/>ad-only mentions"]
 
-    S2 -->|"candidate subjects"| S3
+    S2 --> OUT
 
-    S3["<b>3. Gather facts from corpus</b><br/><i>Tool:</i> search_chunks<br/><i>How:</i> for each subject, search other<br/>pages for additional mentions &amp; facts<br/><i>Returns:</i> all known info per subject"]
-
-    S3 -->|"research gathered"| S4
-
-    S4["<b>4. Check wiki for existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob wiki/*.md<br/><i>Skips:</i> subjects that already have articles"]
-
-    S4 --> OUT
-
-    OUT["<b>Output:</b> structured blocks per subject:<br/>=== ENTITY: Name (type) ===<br/>facts + source citations<br/>=== END ENTITY ==="]
+    OUT["<b>Output:</b> structured blocks:<br/>=== ENTITY: Name (type) ===<br/>info + Source: title, p.N<br/>=== END ENTITY ==="]
 
     %% Styling
-    classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
-    classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
     classDef srcMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
     classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef srcStop fill:#999,stroke:#666,color:#fff
 
     class S1 srcMixed
     class S2 srcLlm
-    class S3 srcDb
-    class S4 srcWiki
     class OUT_AD srcStop
 ```
 
@@ -106,7 +94,7 @@ flowchart LR
 
 ## Writer (detail)
 
-The writer also runs as a **single ReAct LLM invoke()**, receiving the full message history from the researcher.
+The writer runs as a **single ReAct LLM invoke()**, receiving the full message history from the researcher (including entity blocks). For each entity, the writer decides whether to **create** a new article or **update** an existing one.
 
 ```mermaid
 flowchart LR
@@ -114,25 +102,25 @@ flowchart LR
 
     IN --> S1
 
-    S1["<b>1. Gather source material</b><br/><i>Tools:</i> search_chunks, get_page_text<br/><i>How:</i> SQL queries for each entity<br/><i>Returns:</i> relevant passages from corpus"]
+    S1["<b>1. Check existing articles</b><br/><i>Tools:</i> search_article_files, read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing content (if any) per entity"]
 
-    S1 -->|"source passages"| S2
+    S1 -->|"existing or new"| S2
 
-    S2["<b>2. Check existing articles</b><br/><i>Tools:</i> search_article_files, read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing content to avoid duplication"]
+    S2["<b>2. Gather extra context</b><br/><i>Tools:</i> search_chunks, get_page_text<br/><i>How:</i> SQL queries for supporting material<br/><i>Returns:</i> additional passages from corpus"]
 
     S2 -->|"all context gathered"| S3
 
-    S3["<b>3. Draft wiki articles</b><br/><i>How:</i> LLM generates article text<br/>with inline citations &lt;sup&gt;[N]&lt;/sup&gt;<br/>and ## References section<br/><i>Returns:</i><br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
+    S3["<b>3. Write / update articles</b><br/><i>How:</i> LLM creates new article or merges<br/>new info into existing article<br/>with &lt;sup&gt;[N]&lt;/sup&gt; citations<br/><i>Returns:</i> full article text per entity<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
 
-    S3 --> OUT["<b>Output:</b> all messages including<br/>delimited article blocks"]
+    S3 --> OUT["<b>Output:</b> all messages including<br/>delimited article blocks<br/>(new + updated)"]
 
     %% Styling
     classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
     classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
     classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
 
-    class S1 srcDb
-    class S2 srcWiki
+    class S1 srcWiki
+    class S2 srcDb
     class S3 srcLlm
 ```
 
@@ -140,7 +128,7 @@ flowchart LR
 
 ## Editor (detail)
 
-The editor is **deterministic Python** — no LLM calls. It receives the full message history and writes files to disk.
+The editor is **deterministic Python** — no LLM calls. It receives the full message history and writes files to disk. It can both create new files and overwrite existing ones (for updates from the writer).
 
 ```mermaid
 flowchart LR
@@ -160,9 +148,9 @@ flowchart LR
 
     S3 -->|"matched + unmatched"| S4
 
-    S4["<b>4. Write markdown files</b><br/><i>Phase a:</i> entity + matched article &rarr; full article<br/><i>Phase b:</i> unmatched article block &rarr; infer type, write<br/><i>Phase c:</i> unmatched entity &rarr; stub from context<br/><br/><i>Each file:</i> YAML front matter + body<br/><i>Path:</i> wiki/entity_type/slug.md"]
+    S4["<b>4. Write markdown files</b><br/><i>Matched:</i> entity + article &rarr; write (create or update)<br/><i>Unmatched article:</i> infer type, write<br/><i>Unmatched entity:</i> stub from researcher context<br/><br/><i>Each file:</i> YAML front matter + body<br/><i>Path:</i> wiki/entity_type/slug.md"]
 
-    S4 --> OUT["<b>Output:</b> written article paths"]
+    S4 --> OUT["<b>Output:</b> written / updated article paths"]
 
     %% Styling
     classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
@@ -176,29 +164,25 @@ flowchart LR
 
 | Stage | Type | Tools | Input | Output |
 |-------|------|-------|-------|--------|
-| **Researcher** | ReAct LLM | 5 | Page text + image | Classification + entity blocks in messages |
+| **Researcher** | ReAct LLM | 1 | Page text + image | Classification + entity:info:source blocks |
 | **Router** | Deterministic | 0 | ToolMessage from classify | `"writer"` or `END` |
-| **Writer** | ReAct LLM | 4 | Researcher messages | `=== ARTICLE ===` delimited blocks |
+| **Writer** | ReAct LLM | 4 | Researcher messages + entity blocks | `=== ARTICLE ===` blocks (new + updated) |
 | **Editor** | Deterministic Python | 0 | All messages (entity + article blocks) | Markdown files in `wiki/` |
 
-### Researcher Tools (5)
+### Researcher Tools (1)
 
 | Tool | Source | Purpose |
 |------|--------|---------|
 | `classify_page_content` | PDF image + OCR | Determine if page is ad/editorial/mixed |
-| `search_chunks` | DuckDB | Find text chunks matching a query |
-| `get_page_text` | DuckDB | Get full OCR text for a page |
-| `list_documents` | DuckDB | List available documents |
-| `search_article_files` | wiki/*.md | Check if an article already exists |
 
 ### Writer Tools (4)
 
 | Tool | Source | Purpose |
 |------|--------|---------|
+| `search_article_files` | wiki/*.md | Check if an article already exists |
+| `read_article_file` | wiki/*.md | Read existing article content (for updates) |
 | `search_chunks` | DuckDB | Find supporting text passages |
 | `get_page_text` | DuckDB | Get full OCR text for a page |
-| `search_article_files` | wiki/*.md | Check existing articles |
-| `read_article_file` | wiki/*.md | Read an existing article's content |
 
 ### LLM Backend
 

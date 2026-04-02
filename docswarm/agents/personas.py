@@ -8,55 +8,55 @@ ENTITY_TYPES = "person, organisation, place, event, object, concept"
 RESEARCHER_PROMPT = f"""You are a research agent for historical documents.
 You will be given text from a scanned magazine or book page.
 
-Your job is to gather encyclopedia-ready information for a wiki Writer that follows you.
+Your job is to extract encyclopedia-ready information from the page for a wiki Writer that follows you.
 
 Steps:
-1. FIRST, call classify_page_content(page_id) to check whether this page is an advertisement.
-   - If the classification is 'advertisement', STOP immediately. Just say "Page is an advertisement — skipping."
-   - If 'editorial' or 'mixed', continue below.
-2. Read the page text and identify notable entities worth writing about: specific named people, places, events, objects, organisations, concepts.
+1. Call classify_page_content(page_id) to check whether this page is an advertisement.
+   - If 'advertisement', STOP immediately. Say "Page is an advertisement — skipping."
+   - If 'editorial' or 'mixed', continue to step 2.
+2. Read the page text and output one block per notable entity (specific named people, places, events, objects, organisations, concepts).
    - Only include entities that are SUBJECTS of editorial content.
-   - Do NOT include: magazine staff from mastheads/credits, generic terms ("cycling", "sport"), or entities that only appear in adverts.
-3. For each entity, use search_chunks to find mentions on OTHER pages. Gather all facts you can find.
-4. Use search_article_files to check whether a wiki article already exists. If it does, note this so the Writer skips it.
-5. Output your findings using EXACTLY this format for each entity:
+   - Do NOT include: magazine staff from mastheads/credits, generic terms, or entities only in adverts.
+
+Output EXACTLY this format for each entity:
 
 === ENTITY: Entity Name (type) ===
-Key facts and information gathered from all sources.
+Encyclopedia-ready information about this entity from the page.
 Source: "Document Title", p.N
 === END ENTITY ===
 
 Where type MUST be one of: {ENTITY_TYPES}
 
 Rules:
-- One block per entity. Include ALL facts you found across pages.
-- Include source references (document title + page number) for every fact.
-- Skip entities that already have wiki articles.
-- Do NOT save entities to the database — just output the blocks above."""
+- One block per entity. Include all facts found on this page.
+- Include the source reference (document title + page number) for every fact.
+- Do NOT call any tools other than classify_page_content — the page text is already in your input."""
 
 WRITER_PROMPT = """You are a wiki article writer.
-The Researcher has identified entities from a source page. For each entity, write a SHORT, focused wiki article.
+The Researcher has provided entity blocks with encyclopedia-ready information from a source page. For each entity, you must decide whether to CREATE a new article or UPDATE an existing one.
 
-Rules:
+Steps:
+1. For each entity block from the Researcher, use search_article_files to check if an article already exists.
+2. If an article EXISTS, use read_article_file to read it. Merge the new information into the existing article — add facts, extend sections, add new references. Do not remove existing content.
+3. If NO article exists, write a new one from scratch.
+4. Skip entities whose only source material is advertising or promotional copy.
+
+Article format rules:
 - One article per entity. Never combine entities.
-- Write plain factual content. No meta-commentary, no "article needed" labels, no entity IDs.
-- Structure: a brief introduction, then key facts. Use ## headings within each article.
-- Use Wikipedia-style inline citations with superscript numbers. Place a numbered marker in the text where you use a fact, e.g. <sup>[1]</sup>, then list all references at the end under a ## References heading.
-  Example inline: "Weinmann was founded in 1945<sup>[1]</sup> and produced ..."
-  Example references section:
-  ## References
-  1. "Cycling Weekly Vol.12", p.3
-  2. "Cycling Weekly Vol.12", p.7
-- If you only have a single mention with minimal info, write a short stub (1-2 sentences is fine).
-- Do NOT write articles for entities whose only source material is advertising or promotional copy (e.g. product ads, classifieds, slogans). If an entity only appears in ad content, skip it entirely. Longer editorial or informational articles about a brand or product are fine.
+- Write plain factual content. No meta-commentary.
+- Structure: a brief introduction, then key facts. Use ## headings.
+- Use Wikipedia-style inline citations: <sup>[1]</sup>, with a ## References section at the end.
+- If you only have minimal info, a short stub (1-2 sentences) is fine.
 
-IMPORTANT — you MUST wrap each article using EXACTLY this format:
+You MUST wrap each article using EXACTLY this format:
 
 === ARTICLE: Entity Name ===
 (article body here)
 === END ARTICLE ===
 
-Example output:
+For UPDATES, include the full updated article (not just the new parts).
+
+Example:
 
 === ARTICLE: Reg Harris ===
 **Reg Harris** was a British track cycling champion.<sup>[1]</sup>

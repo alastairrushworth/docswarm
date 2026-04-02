@@ -316,13 +316,10 @@ class DocSwarm:
             name_set = set(names)
             return [t for t in tools if t.name in name_set]
 
-        research_tools = (
-            classification_tools
-            + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
-            + _pick(file_read_tools, "search_article_files")
-        )
-        writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
-            file_read_tools, "search_article_files", "read_article_file"
+        research_tools = classification_tools
+        writer_tools = (
+            _pick(db_tools, "search_chunks", "get_page_text")
+            + _pick(file_read_tools, "search_article_files", "read_article_file")
         )
 
         for agent_name, tools in [
@@ -482,14 +479,14 @@ class DocSwarm:
             etype = _safe_type(entity_type)
             file_path = root / etype / (slug + ".md")
 
-            if file_path.exists():
-                log.debug("[editor] article already exists: %s", file_path)
-                continue
-
             match = _match_entity_to_article(name, article_blocks)
             if match:
                 title, body = match
                 matched_blocks.add(_normalize(title))
+            elif file_path.exists():
+                # No writer output and file already exists — nothing to do
+                log.debug("[editor] article already exists, no update: %s", file_path)
+                continue
             else:
                 # Stub from researcher context
                 body = f"**{name}** is a {entity_type}.<sup>[1]</sup>\n"
@@ -528,8 +525,6 @@ class DocSwarm:
             if not etype:
                 etype = "person"
             file_path = root / etype / (slug + ".md")
-            if file_path.exists():
-                continue
             file_path.parent.mkdir(parents=True, exist_ok=True)
             meta = {
                 "title": title,

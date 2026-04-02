@@ -124,13 +124,10 @@ class TestToolFactoryCounts:
             name_set = set(names)
             return [t for t in tools if t.name in name_set]
 
-        research_tools = (
-            classification_tools
-            + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
-            + _pick(file_read_tools, "search_article_files")
-        )
-        writer_tools = _pick(db_tools, "search_chunks", "get_page_text") + _pick(
-            file_read_tools, "search_article_files", "read_article_file"
+        research_tools = classification_tools
+        writer_tools = (
+            _pick(db_tools, "search_chunks", "get_page_text")
+            + _pick(file_read_tools, "search_article_files", "read_article_file")
         )
 
         research_names = {t.name for t in research_tools}
@@ -138,10 +135,6 @@ class TestToolFactoryCounts:
 
         assert research_names == {
             "classify_page_content",
-            "search_chunks",
-            "get_page_text",
-            "list_documents",
-            "search_article_files",
         }
         assert writer_names == {
             "search_chunks",
@@ -201,18 +194,7 @@ class TestToolSchemaSerialization:
 class TestResearcherInvokeWithMockLLM:
     @staticmethod
     def _build_research_tools(tmp_config, db):
-        db_tools = create_db_tools(db)
-        classification_tools = create_classification_tools(db, config=tmp_config)
-        file_read_tools = create_file_read_tools(str(tmp_config.wiki_output_dir))
-
-        def _pick(tools, *names):
-            return [t for t in tools if t.name in set(names)]
-
-        return (
-            classification_tools
-            + _pick(db_tools, "search_chunks", "get_page_text", "list_documents")
-            + _pick(file_read_tools, "search_article_files")
-        )
+        return create_classification_tools(db, config=tmp_config)
 
     def test_invoke_does_not_crash_with_short_message(self, tmp_config, db):
         """Researcher invoke works with a short message and mocked LLM."""
