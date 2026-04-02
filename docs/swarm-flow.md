@@ -17,21 +17,23 @@ flowchart TD
     end
 
     subgraph RESEARCHER["Researcher Agent (LLM)"]
-        direction TB
-        R["Receive page text<br/>+ metadata"]
+        R["Receive page text + metadata"]
         R --> R_CLASSIFY["1. Classify page"]
         R_CLASSIFY --> R_EXTRACT["2. Extract entities"]
         R_EXTRACT --> R_SEARCH["3. Search for<br/>supporting material"]
         R_SEARCH --> R_SAVE["4. Save entities<br/>to database"]
         R_SAVE --> R_CHECK["5. Check existing<br/>wiki articles"]
 
-        subgraph R_TOOLS["Researcher Tools (8)"]
-            direction TB
-            RT_VISION["classify_page_content<br/><i>multimodal vision LLM call</i>"]
-            RT_DB["search_chunks &middot; get_page_text &middot; list_documents<br/><i>DuckDB read queries</i>"]
-            RT_ENTITY["save_entity &middot; search_entities &middot; get_entities_for_page<br/><i>entity table read/write</i>"]
-            RT_FILES["search_article_files<br/><i>wiki filesystem search</i>"]
-        end
+        RT_VISION["classify_page_content<br/><i>multimodal vision LLM</i>"]
+        RT_DB["search_chunks &middot; get_page_text<br/>&middot; list_documents<br/><i>DuckDB read queries</i>"]
+        RT_ENTITY["save_entity &middot; search_entities<br/>&middot; get_entities_for_page<br/><i>entity table read/write</i>"]
+        RT_FILES["search_article_files<br/><i>wiki filesystem search</i>"]
+
+        R_CLASSIFY -.-> RT_VISION
+        R_EXTRACT -.-> RT_DB
+        R_SEARCH -.-> RT_DB
+        R_SAVE -.-> RT_ENTITY
+        R_CHECK -.-> RT_FILES
     end
 
     R_CHECK --> ROUTE{"Route:<br/>page classification?"}
@@ -40,17 +42,17 @@ flowchart TD
     ROUTE -->|"editorial / mixed"| W
 
     subgraph WRITER["Writer Agent (LLM)"]
-        direction TB
         W["Receive researcher<br/>messages + entities"]
         W --> W_READ["1. Read source chunks"]
         W_READ --> W_SEARCH["2. Search for<br/>additional context"]
         W_SEARCH --> W_DRAFT["3. Draft wiki articles<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
 
-        subgraph W_TOOLS["Writer Tools (4)"]
-            direction TB
-            WT_DB["search_chunks &middot; get_page_text<br/><i>DuckDB read queries</i>"]
-            WT_FILES["read_article_file &middot; search_article_files<br/><i>wiki filesystem read/search</i>"]
-        end
+        WT_DB["search_chunks &middot; get_page_text<br/><i>DuckDB read queries</i>"]
+        WT_FILES["read_article_file<br/>&middot; search_article_files<br/><i>wiki filesystem read/search</i>"]
+
+        W_READ -.-> WT_DB
+        W_SEARCH -.-> WT_DB
+        W_SEARCH -.-> WT_FILES
     end
 
     W_DRAFT --> E
@@ -60,28 +62,27 @@ flowchart TD
         E["Receive all messages"]
         E --> E_PARSE["1. Parse article blocks<br/><i>primary: === delimiters</i><br/><i>fallback: markdown headings</i>"]
         E_PARSE --> E_FILTER["2. Filter meta-content<br/>& masthead entities"]
-        E_FILTER --> E_MATCH["3. Match entities<br/>to article blocks<br/><i>(fuzzy name matching)</i>"]
-        E_MATCH --> E_PHASE1["4a. Phase 1: Write matched<br/>entity articles"]
-        E_PHASE1 --> E_PHASE2["4b. Phase 2: Write unmatched<br/>article blocks"]
-        E_PHASE2 --> E_STUB["4c. Stub articles for<br/>unmatched entities"]
+        E_FILTER --> E_MATCH["3. Match entities to articles<br/><i>(fuzzy name matching)</i>"]
+        E_MATCH --> E_WRITE["4. Write markdown files<br/><i>a) matched entities</i><br/><i>b) unmatched blocks</i><br/><i>c) stubs for remainder</i>"]
     end
 
     subgraph OUTPUT["Output"]
         WIKI["wiki/<br/>  person/*.md<br/>  organisation/*.md<br/>  place/*.md<br/>  event/*.md<br/>  concept/*.md<br/>  object/*.md"]
     end
 
-    E_STUB --> WIKI
-    E_STUB --> MARK["log_page_study()"]
+    E_WRITE --> WIKI
+    E_WRITE --> MARK["log_page_study()"]
     MARK --> NEXT
 
     NEXT -->|"no more pages"| DONE((Done))
 
     %% Data flow connections
-    DB -.->|"chunks, pages,<br/>entities"| R_TOOLS
-    PDF -.->|"page image<br/>(base64)"| RT_VISION
-    DB -.->|"chunks, pages"| W_TOOLS
-    LLM_BACKEND -.->|"USE_OLLAMA<br/>env var"| RESEARCHER
-    LLM_BACKEND -.->|"USE_OLLAMA<br/>env var"| WRITER
+    PDF -.->|"page image (base64)"| RT_VISION
+    DB -.-> RT_DB
+    DB -.-> RT_ENTITY
+    DB -.-> WT_DB
+    LLM_BACKEND -.->|"USE_OLLAMA"| RESEARCHER
+    LLM_BACKEND -.->|"USE_OLLAMA"| WRITER
 
     %% Styling
     classDef agent fill:#4a90d9,stroke:#2c5f8a,color:#fff
@@ -92,7 +93,7 @@ flowchart TD
 
     class R,R_CLASSIFY,R_EXTRACT,R_SEARCH,R_SAVE,R_CHECK agent
     class W,W_READ,W_SEARCH,W_DRAFT agent
-    class E,E_PARSE,E_FILTER,E_MATCH,E_PHASE1,E_PHASE2,E_STUB deterministic
+    class E,E_PARSE,E_FILTER,E_MATCH,E_WRITE deterministic
     class RT_VISION,RT_DB,RT_ENTITY,RT_FILES,WT_DB,WT_FILES tool
     class DB,PDF,WIKI data
     class ROUTE decision
