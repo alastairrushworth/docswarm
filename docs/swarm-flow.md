@@ -1,94 +1,98 @@
 # DocSwarm Process Flow
 
 ```mermaid
-flowchart TD
+flowchart LR
     subgraph KEY["Data Sources (colour key)"]
-        direction LR
+        direction TB
         DB[(DuckDB/DuckLake<br/>documents, pages,<br/>chunks, entities)]
         PDF["Scanned PDF Pages<br/>(images + OCR text)"]
         WIKI_IN["wiki/*.md<br/>(existing articles)"]
     end
 
-    KEY ~~~ START
-    START((Start)) --> NEXT["get_next_unstudied_page()"]
-    NEXT -->|"page dict<br/>(id, raw_text, image_path)"| R
+    START((Start)) --> NEXT["get_next_<br/>unstudied_page()"]
+    NEXT -->|"page dict"| R
 
-    subgraph LLM_BACKEND["LLM Backend (configurable)"]
-        direction LR
-        OLLAMA["Ollama<br/>qwen3.5:4b / gemma3:4b"]
+    subgraph LLM_BACKEND["LLM Backend"]
+        direction TB
+        OLLAMA["Ollama"]
         OPENAI["OpenAI<br/>gpt-5.4-nano"]
     end
 
-    subgraph RESEARCHER["Researcher Agent (ReAct LLM)"]
+    subgraph RESEARCHER["Researcher Agent — single ReAct LLM invoke()"]
+        direction TB
+
         R["Receive page text + metadata"]
 
-        R -->|"LLM emits<br/>tool call"| R_CLASSIFY
+        R -->|"LLM emits tool call"| R_CLASSIFY
 
-        R_CLASSIFY["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> sends page image + OCR text<br/>to vision LLM<br/><i>Returns:</i> editorial / advertisement / mixed"]
+        R_CLASSIFY["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> page image + OCR &rarr; vision LLM<br/><i>Returns:</i> editorial / advert / mixed"]
 
-        R_CLASSIFY -->|"classification<br/>label"| R_EXTRACT
+        R_CLASSIFY -->|"classification label"| R_EXTRACT
 
         R_EXTRACT["<b>2. Read page text</b><br/><i>Tools:</i> get_page_text, search_chunks<br/><i>How:</i> SQL queries on chunks table<br/><i>Returns:</i> full OCR text + matching chunks"]
 
-        R_EXTRACT -->|"page text +<br/>chunk results"| R_IDENTIFY
+        R_EXTRACT -->|"page text"| R_IDENTIFY
 
-        R_IDENTIFY["<b>3. Identify entities</b><br/><i>How:</i> LLM reads text, picks out<br/>people, places, organisations, events<br/><i>Returns:</i> candidate entity list"]
+        R_IDENTIFY["<b>3. Identify entities</b><br/><i>How:</i> LLM reads text, picks out<br/>people, places, orgs, events<br/><i>Returns:</i> candidate entity list"]
 
-        R_IDENTIFY -->|"entity names<br/>+ types"| R_SAVE
+        R_IDENTIFY -->|"entity names + types"| R_SAVE
 
-        R_SAVE["<b>4. Save entities</b><br/><i>Tools:</i> save_entity, search_entities<br/><i>How:</i> SQL insert per entity;<br/>checks for duplicates first<br/><i>Returns:</i> entity IDs in database"]
+        R_SAVE["<b>4. Save entities</b><br/><i>Tools:</i> save_entity, search_entities<br/><i>How:</i> check duplicates, SQL insert<br/><i>Returns:</i> entity IDs in DB"]
 
-        R_SAVE -->|"saved entity<br/>IDs + names"| R_CHECK
+        R_SAVE -->|"entity IDs"| R_CHECK
 
-        R_CHECK["<b>5. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities already<br/>have wiki articles"]
+        R_CHECK["<b>5. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities need new articles"]
     end
 
-    R_CHECK -->|"read ToolMessage<br/>from step 1"| ROUTE{"Route:<br/>page classification?"}
-    ROUTE -->|"advertisement"| SKIP["Skip page"]
-    SKIP --> MARK
-    ROUTE -->|"editorial / mixed"| W
+    R_CHECK -->|"researcher done;<br/>read ToolMessage<br/>from step 1"| ROUTE
 
-    subgraph WRITER["Writer Agent (ReAct LLM)"]
+    ROUTE{"Route:<br/>classification?"}
+    ROUTE -->|"advertisement"| MARK
+    ROUTE -->|"editorial /<br/>mixed"| W
+
+    subgraph WRITER["Writer Agent — single ReAct LLM invoke()"]
+        direction TB
+
         W["Receive researcher messages + entity list"]
 
-        W -->|"LLM emits<br/>tool call"| W_READ
+        W -->|"LLM emits tool call"| W_READ
 
         W_READ["<b>1. Gather source material</b><br/><i>Tools:</i> search_chunks, get_page_text<br/><i>How:</i> SQL queries for each entity<br/><i>Returns:</i> relevant passages"]
 
-        W_READ -->|"source<br/>passages"| W_SEARCH
+        W_READ -->|"source passages"| W_SEARCH
 
-        W_SEARCH["<b>2. Check existing articles</b><br/><i>Tools:</i> search_article_files, read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing article content to avoid duplication"]
+        W_SEARCH["<b>2. Check existing articles</b><br/><i>Tools:</i> search_article_files,<br/>read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing content"]
 
-        W_SEARCH -->|"all context<br/>gathered"| W_DRAFT
+        W_SEARCH -->|"all context gathered"| W_DRAFT
 
-        W_DRAFT["<b>3. Draft wiki articles</b><br/><i>How:</i> LLM generates article text<br/>with inline citations<br/><i>Returns:</i> === ARTICLE: Name ===<br/>..body with refs..<br/>=== END ARTICLE ==="]
+        W_DRAFT["<b>3. Draft wiki articles</b><br/><i>How:</i> LLM generates text with<br/>inline citations<br/><i>Returns:</i> === ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
     end
 
-    W_DRAFT -->|"all messages<br/>(researcher + writer)"| E
+    W_DRAFT -->|"all messages"| E
 
-    subgraph EDITOR["Editor (Deterministic Python -- no LLM)"]
+    subgraph EDITOR["Editor — deterministic Python, no LLM"]
         direction TB
 
         E["Receive all messages"]
 
-        E -->|"regex scan<br/>all AI messages"| E_PARSE
+        E -->|"regex scan"| E_PARSE
 
-        E_PARSE["<b>1. Parse article blocks</b><br/><i>How:</i> regex for === ARTICLE === delimiters<br/><i>Fallback:</i> markdown heading boundaries<br/><i>Returns:</i> dict of title &rarr; body"]
+        E_PARSE["<b>1. Parse article blocks</b><br/><i>How:</i> regex for === delimiters<br/><i>Fallback:</i> markdown headings<br/><i>Returns:</i> title &rarr; body dict"]
 
-        E_PARSE -->|"article blocks +<br/>entity list from DB"| E_FILTER
+        E_PARSE -->|"blocks + entities"| E_FILTER
 
-        E_FILTER["<b>2. Filter</b><br/><i>How:</i> remove meta-content headings<br/>(summaries, page analysis, etc.)<br/>+ masthead entities (editor, publisher)<br/><i>Returns:</i> cleaned entities + blocks"]
+        E_FILTER["<b>2. Filter</b><br/><i>How:</i> remove meta-content headings<br/>+ masthead entities<br/><i>Returns:</i> cleaned set"]
 
-        E_FILTER -->|"filtered entities<br/>+ blocks"| E_MATCH
+        E_FILTER -->|"filtered"| E_MATCH
 
-        E_MATCH["<b>3. Match entities to articles</b><br/><i>How:</i> normalize names to lowercase<br/>alphanumeric, then exact + substring match<br/><i>Returns:</i> matched pairs + unmatched remainder"]
+        E_MATCH["<b>3. Match entities to articles</b><br/><i>How:</i> normalize names, exact +<br/>substring match<br/><i>Returns:</i> matched pairs + remainder"]
 
-        E_MATCH -->|"matched +<br/>unmatched"| E_WRITE
+        E_MATCH -->|"matched + unmatched"| E_WRITE
 
-        E_WRITE["<b>4. Write markdown files</b><br/><i>a)</i> entity + matched block &rarr; full article<br/><i>b)</i> unmatched block &rarr; infer type, write<br/><i>c)</i> unmatched entity &rarr; stub from context<br/><i>Output:</i> wiki/type/slug.md with YAML front matter"]
+        E_WRITE["<b>4. Write markdown files</b><br/><i>a)</i> matched &rarr; full article<br/><i>b)</i> unmatched block &rarr; infer type<br/><i>c)</i> unmatched entity &rarr; stub<br/><i>Output:</i> wiki/type/slug.md"]
     end
 
-    E_WRITE -->|"new/updated<br/>articles"| WIKI_IN
+    E_WRITE -->|"new articles"| WIKI_IN
     E_WRITE --> MARK["log_page_study()"]
     MARK --> NEXT
 
@@ -98,18 +102,17 @@ flowchart TD
     LLM_BACKEND -.->|"USE_OLLAMA"| WRITER
 
     %% Styling
-    classDef agent fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
     classDef decision fill:#9b59b6,stroke:#7d3c98,color:#fff
 
-    %% Data source colours — applied to steps by their primary dependency
+    %% Data source colours
     classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
     classDef srcPdf fill:#e74c3c,stroke:#c0392b,color:#fff
     classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
     classDef srcMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
     classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
 
-    %% Researcher steps coloured by data source
+    %% Researcher steps by data source
     class R srcLlm
     class R_CLASSIFY srcMixed
     class R_EXTRACT srcDb
@@ -117,7 +120,7 @@ flowchart TD
     class R_SAVE srcDb
     class R_CHECK srcWiki
 
-    %% Writer steps coloured by data source
+    %% Writer steps by data source
     class W srcLlm
     class W_READ srcDb
     class W_SEARCH srcWiki
@@ -126,10 +129,8 @@ flowchart TD
     %% Editor steps
     class E,E_PARSE,E_FILTER,E_MATCH,E_WRITE deterministic
 
-    %% Decision
+    %% Decision + key
     class ROUTE decision
-
-    %% Key nodes
     class DB srcDb
     class PDF srcPdf
     class WIKI_IN srcWiki
