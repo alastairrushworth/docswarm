@@ -5,6 +5,7 @@ flowchart TD
     subgraph INPUT["Input"]
         DB[(DuckDB/DuckLake<br/>documents, pages,<br/>chunks, entities)]
         PDF["Scanned PDF Pages<br/>(page images + OCR text)"]
+        WIKI_IN["wiki/*.md<br/>(existing articles)"]
     end
 
     START((Start)) --> NEXT["get_next_unstudied_page()"]
@@ -25,9 +26,9 @@ flowchart TD
         R_SAVE --> R_CHECK["5. Check existing<br/>wiki articles"]
 
         RT_VISION["classify_page_content<br/><i>multimodal vision LLM</i>"]
-        RT_DB["search_chunks &middot; get_page_text<br/>&middot; list_documents<br/><i>DuckDB read queries</i>"]
-        RT_ENTITY["save_entity &middot; search_entities<br/>&middot; get_entities_for_page<br/><i>entity table read/write</i>"]
-        RT_FILES["search_article_files<br/><i>wiki filesystem search</i>"]
+        RT_DB["search_chunks &middot; get_page_text<br/>&middot; list_documents"]
+        RT_ENTITY["save_entity &middot; search_entities<br/>&middot; get_entities_for_page"]
+        RT_FILES["search_article_files"]
 
         R_CLASSIFY -.-> RT_VISION
         R_EXTRACT -.-> RT_DB
@@ -47,8 +48,8 @@ flowchart TD
         W_READ --> W_SEARCH["2. Search for<br/>additional context"]
         W_SEARCH --> W_DRAFT["3. Draft wiki articles<br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
 
-        WT_DB["search_chunks &middot; get_page_text<br/><i>DuckDB read queries</i>"]
-        WT_FILES["read_article_file<br/>&middot; search_article_files<br/><i>wiki filesystem read/search</i>"]
+        WT_DB["search_chunks &middot; get_page_text"]
+        WT_FILES["read_article_file<br/>&middot; search_article_files"]
 
         W_READ -.-> WT_DB
         W_SEARCH -.-> WT_DB
@@ -66,38 +67,47 @@ flowchart TD
         E_MATCH --> E_WRITE["4. Write markdown files<br/><i>a) matched entities</i><br/><i>b) unmatched blocks</i><br/><i>c) stubs for remainder</i>"]
     end
 
-    subgraph OUTPUT["Output"]
-        WIKI["wiki/<br/>  person/*.md<br/>  organisation/*.md<br/>  place/*.md<br/>  event/*.md<br/>  concept/*.md<br/>  object/*.md"]
-    end
-
-    E_WRITE --> WIKI
+    E_WRITE -->|"new/updated<br/>articles"| WIKI_IN
     E_WRITE --> MARK["log_page_study()"]
     MARK --> NEXT
 
     NEXT -->|"no more pages"| DONE((Done))
 
-    %% Data flow connections
-    PDF -.->|"page image (base64)"| RT_VISION
-    DB -.-> RT_DB
-    DB -.-> RT_ENTITY
-    DB -.-> WT_DB
     LLM_BACKEND -.->|"USE_OLLAMA"| RESEARCHER
     LLM_BACKEND -.->|"USE_OLLAMA"| WRITER
 
     %% Styling
+    %% Agent steps: blue
     classDef agent fill:#4a90d9,stroke:#2c5f8a,color:#fff
-    classDef tool fill:#f0ad4e,stroke:#c77f1a,color:#000
+    %% Editor steps: green
     classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
-    classDef data fill:#d9534f,stroke:#b52b27,color:#fff
+    %% Decision: purple
     classDef decision fill:#9b59b6,stroke:#7d3c98,color:#fff
+
+    %% Tool colours by data source:
+    %%   Orange = reads from DuckDB
+    %%   Red-pink = reads from PDF/page images
+    %%   Teal = reads/writes wiki filesystem
+    classDef toolDb fill:#f0ad4e,stroke:#c77f1a,color:#000
+    classDef toolPdf fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef toolWiki fill:#1abc9c,stroke:#16a085,color:#fff
+    %% Mixed: DuckDB + PDF (striped not possible, so split border)
+    classDef toolMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
 
     class R,R_CLASSIFY,R_EXTRACT,R_SEARCH,R_SAVE,R_CHECK agent
     class W,W_READ,W_SEARCH,W_DRAFT agent
     class E,E_PARSE,E_FILTER,E_MATCH,E_WRITE deterministic
-    class RT_VISION,RT_DB,RT_ENTITY,RT_FILES,WT_DB,WT_FILES tool
-    class DB,PDF,WIKI data
     class ROUTE decision
+
+    class RT_DB,RT_ENTITY,WT_DB toolDb
+    class RT_VISION toolMixed
+    class RT_FILES,WT_FILES,WIKI_IN toolWiki
 ```
+
+**Tool colour key** — coloured by data source:
+- **Orange** = DuckDB (chunks, pages, entities)
+- **Red** = PDF page images (with orange border = also uses DuckDB for page lookup)
+- **Teal** = Wiki filesystem
 
 ## Pipeline Summary
 
