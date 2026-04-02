@@ -1,167 +1,187 @@
 # DocSwarm Process Flow
 
+## High-Level Pipeline
+
 ```mermaid
 flowchart LR
     subgraph KEY["Data Sources (colour key)"]
         direction TB
-        DB[(DuckDB/DuckLake<br/>documents, pages,<br/>chunks, entities)]
-        PDF["Scanned PDF Pages<br/>(images + OCR text)"]
-        WIKI_IN["wiki/*.md<br/>(existing articles)"]
+        DB[(DuckDB)]
+        PDF["PDF Pages"]
+        WIKI_IN["wiki/*.md"]
     end
 
-    START((Start)) --> NEXT["get_next_<br/>unstudied_page()"]
-    NEXT -->|"page dict"| R
+    START((Start)) --> NEXT["get_next_unstudied_page()"]
+    NEXT -->|"page dict"| RESEARCHER
 
-    subgraph LLM_BACKEND["LLM Backend"]
-        direction TB
-        OLLAMA["Ollama"]
-        OPENAI["OpenAI<br/>gpt-5.4-nano"]
-    end
+    RESEARCHER["<b>Researcher</b><br/><i>ReAct LLM agent</i><br/>8 tools<br/><br/>Classifies page,<br/>extracts entities,<br/>saves to DB"]
 
-    subgraph RESEARCHER["Researcher Agent — single ReAct LLM invoke()"]
-        direction TB
+    RESEARCHER -->|"all messages"| ROUTE{"Classification?"}
 
-        R["Receive page text + metadata"]
+    ROUTE -->|"advertisement"| MARK["log_page_study()"]
+    ROUTE -->|"editorial / mixed"| WRITER
 
-        R -->|"LLM emits tool call"| R_CLASSIFY
+    WRITER["<b>Writer</b><br/><i>ReAct LLM agent</i><br/>4 tools<br/><br/>Drafts wiki articles<br/>for each entity"]
 
-        R_CLASSIFY["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> page image + OCR &rarr; vision LLM<br/><i>Returns:</i> editorial / advert / mixed"]
+    WRITER -->|"all messages"| EDITOR
 
-        R_CLASSIFY -->|"classification label"| R_EXTRACT
+    EDITOR["<b>Editor</b><br/><i>Deterministic Python</i><br/>no LLM<br/><br/>Parses output,<br/>writes markdown files"]
 
-        R_EXTRACT["<b>2. Read page text</b><br/><i>Tools:</i> get_page_text, search_chunks<br/><i>How:</i> SQL queries on chunks table<br/><i>Returns:</i> full OCR text + matching chunks"]
-
-        R_EXTRACT -->|"page text"| R_IDENTIFY
-
-        R_IDENTIFY["<b>3. Identify entities</b><br/><i>How:</i> LLM reads text, picks out<br/>people, places, orgs, events<br/><i>Returns:</i> candidate entity list"]
-
-        R_IDENTIFY -->|"entity names + types"| R_SAVE
-
-        R_SAVE["<b>4. Save entities</b><br/><i>Tools:</i> save_entity, search_entities<br/><i>How:</i> check duplicates, SQL insert<br/><i>Returns:</i> entity IDs in DB"]
-
-        R_SAVE -->|"entity IDs"| R_CHECK
-
-        R_CHECK["<b>5. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities need new articles"]
-    end
-
-    R_CHECK -->|"researcher done;<br/>read ToolMessage<br/>from step 1"| ROUTE
-
-    ROUTE{"Route:<br/>classification?"}
-    ROUTE -->|"advertisement"| MARK
-    ROUTE -->|"editorial /<br/>mixed"| W
-
-    subgraph WRITER["Writer Agent — single ReAct LLM invoke()"]
-        direction TB
-
-        W["Receive researcher messages + entity list"]
-
-        W -->|"LLM emits tool call"| W_READ
-
-        W_READ["<b>1. Gather source material</b><br/><i>Tools:</i> search_chunks, get_page_text<br/><i>How:</i> SQL queries for each entity<br/><i>Returns:</i> relevant passages"]
-
-        W_READ -->|"source passages"| W_SEARCH
-
-        W_SEARCH["<b>2. Check existing articles</b><br/><i>Tools:</i> search_article_files,<br/>read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing content"]
-
-        W_SEARCH -->|"all context gathered"| W_DRAFT
-
-        W_DRAFT["<b>3. Draft wiki articles</b><br/><i>How:</i> LLM generates text with<br/>inline citations<br/><i>Returns:</i> === ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
-    end
-
-    W_DRAFT -->|"all messages"| E
-
-    subgraph EDITOR["Editor — deterministic Python, no LLM"]
-        direction TB
-
-        E["Receive all messages"]
-
-        E -->|"regex scan"| E_PARSE
-
-        E_PARSE["<b>1. Parse article blocks</b><br/><i>How:</i> regex for === delimiters<br/><i>Fallback:</i> markdown headings<br/><i>Returns:</i> title &rarr; body dict"]
-
-        E_PARSE -->|"blocks + entities"| E_FILTER
-
-        E_FILTER["<b>2. Filter</b><br/><i>How:</i> remove meta-content headings<br/>+ masthead entities<br/><i>Returns:</i> cleaned set"]
-
-        E_FILTER -->|"filtered"| E_MATCH
-
-        E_MATCH["<b>3. Match entities to articles</b><br/><i>How:</i> normalize names, exact +<br/>substring match<br/><i>Returns:</i> matched pairs + remainder"]
-
-        E_MATCH -->|"matched + unmatched"| E_WRITE
-
-        E_WRITE["<b>4. Write markdown files</b><br/><i>a)</i> matched &rarr; full article<br/><i>b)</i> unmatched block &rarr; infer type<br/><i>c)</i> unmatched entity &rarr; stub<br/><i>Output:</i> wiki/type/slug.md"]
-    end
-
-    E_WRITE -->|"new articles"| WIKI_IN
-    E_WRITE --> MARK["log_page_study()"]
+    EDITOR -->|"new articles"| WIKI_IN
+    EDITOR --> MARK
     MARK --> NEXT
-
     NEXT -->|"no more pages"| DONE((Done))
 
-    LLM_BACKEND -.->|"USE_OLLAMA"| RESEARCHER
-    LLM_BACKEND -.->|"USE_OLLAMA"| WRITER
+    subgraph LLM["LLM Backend"]
+        direction TB
+        OLLAMA["Ollama"]
+        OPENAI["OpenAI"]
+    end
+
+    LLM -.->|"USE_OLLAMA"| RESEARCHER
+    LLM -.->|"USE_OLLAMA"| WRITER
 
     %% Styling
+    classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
+    classDef srcPdf fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
+    classDef agent fill:#4a90d9,stroke:#2c5f8a,color:#fff
     classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
     classDef decision fill:#9b59b6,stroke:#7d3c98,color:#fff
 
-    %% Data source colours
+    class DB srcDb
+    class PDF srcPdf
+    class WIKI_IN srcWiki
+    class RESEARCHER,WRITER agent
+    class EDITOR deterministic
+    class ROUTE decision
+```
+
+---
+
+## Researcher (detail)
+
+The researcher runs as a **single ReAct LLM invoke()** — the LLM autonomously decides which tools to call and in what order. The steps below are the typical sequence.
+
+```mermaid
+flowchart TD
+    IN["<b>Input:</b> page text, image path, metadata"]
+
+    IN --> S1
+
+    S1["<b>1. Classify page</b><br/><i>Tool:</i> classify_page_content<br/><i>How:</i> page image + OCR text &rarr; vision LLM<br/><i>Returns:</i> editorial / advertisement / mixed"]
+
+    S1 -->|"classification label"| S2
+
+    S2["<b>2. Read page content</b><br/><i>Tools:</i> get_page_text, search_chunks<br/><i>How:</i> SQL queries on chunks table<br/><i>Returns:</i> full OCR text + relevant chunks"]
+
+    S2 -->|"page text + chunks"| S3
+
+    S3["<b>3. Identify entities</b><br/><i>How:</i> LLM reads text, identifies<br/>people, places, organisations, events,<br/>objects, concepts<br/><i>Returns:</i> candidate entity list with types"]
+
+    S3 -->|"entity names + types"| S4
+
+    S4["<b>4. Save entities</b><br/><i>Tools:</i> search_entities, save_entity<br/><i>How:</i> check for duplicates first,<br/>then SQL insert per entity<br/><i>Returns:</i> entity IDs stored in DB"]
+
+    S4 -->|"saved entity IDs"| S5
+
+    S5["<b>5. Check existing articles</b><br/><i>Tool:</i> search_article_files<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> which entities already<br/>have articles vs need new ones"]
+
+    S5 --> OUT["<b>Output:</b> messages with classification<br/>+ entities saved in DB"]
+
+    %% Styling
     classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
-    classDef srcPdf fill:#e74c3c,stroke:#c0392b,color:#fff
     classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
     classDef srcMixed fill:#e74c3c,stroke:#f0ad4e,color:#fff,stroke-width:4px
     classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
 
-    %% Researcher steps by data source
-    class R srcLlm
-    class R_CLASSIFY srcMixed
-    class R_EXTRACT srcDb
-    class R_IDENTIFY srcLlm
-    class R_SAVE srcDb
-    class R_CHECK srcWiki
-
-    %% Writer steps by data source
-    class W srcLlm
-    class W_READ srcDb
-    class W_SEARCH srcWiki
-    class W_DRAFT srcLlm
-
-    %% Editor steps
-    class E,E_PARSE,E_FILTER,E_MATCH,E_WRITE deterministic
-
-    %% Decision + key
-    class ROUTE decision
-    class DB srcDb
-    class PDF srcPdf
-    class WIKI_IN srcWiki
+    class S1 srcMixed
+    class S2 srcDb
+    class S3 srcLlm
+    class S4 srcDb
+    class S5 srcWiki
 ```
 
-## Pipeline Summary
+---
+
+## Writer (detail)
+
+The writer also runs as a **single ReAct LLM invoke()**, receiving the full message history from the researcher.
+
+```mermaid
+flowchart TD
+    IN["<b>Input:</b> researcher messages + entity list"]
+
+    IN --> S1
+
+    S1["<b>1. Gather source material</b><br/><i>Tools:</i> search_chunks, get_page_text<br/><i>How:</i> SQL queries for each entity<br/><i>Returns:</i> relevant passages from corpus"]
+
+    S1 -->|"source passages"| S2
+
+    S2["<b>2. Check existing articles</b><br/><i>Tools:</i> search_article_files, read_article_file<br/><i>How:</i> glob + read wiki/*.md<br/><i>Returns:</i> existing content to avoid duplication"]
+
+    S2 -->|"all context gathered"| S3
+
+    S3["<b>3. Draft wiki articles</b><br/><i>How:</i> LLM generates article text<br/>with inline citations &lt;sup&gt;[N]&lt;/sup&gt;<br/>and ## References section<br/><i>Returns:</i><br/>=== ARTICLE: Name ===<br/>..body..<br/>=== END ARTICLE ==="]
+
+    S3 --> OUT["<b>Output:</b> all messages including<br/>delimited article blocks"]
+
+    %% Styling
+    classDef srcDb fill:#f0ad4e,stroke:#c77f1a,color:#000
+    classDef srcWiki fill:#1abc9c,stroke:#16a085,color:#fff
+    classDef srcLlm fill:#4a90d9,stroke:#2c5f8a,color:#fff
+
+    class S1 srcDb
+    class S2 srcWiki
+    class S3 srcLlm
+```
+
+---
+
+## Editor (detail)
+
+The editor is **deterministic Python** — no LLM calls. It receives the full message history and writes files to disk.
+
+```mermaid
+flowchart TD
+    IN["<b>Input:</b> all messages (researcher + writer)<br/>+ entity list from DB"]
+
+    IN -->|"regex scan all AI messages"| S1
+
+    S1["<b>1. Parse article blocks</b><br/><i>Primary:</i> regex for === ARTICLE === delimiters<br/><i>Fallback:</i> markdown heading boundaries<br/><i>Returns:</i> dict of title &rarr; body"]
+
+    S1 -->|"raw blocks"| S2
+
+    S2["<b>2. Filter</b><br/><i>Remove:</i> meta-content headings<br/>(entity summaries, page analysis)<br/><i>Remove:</i> masthead entities<br/>(editor, publisher, photographer)<br/><i>Returns:</i> cleaned entities + blocks"]
+
+    S2 -->|"filtered"| S3
+
+    S3["<b>3. Match entities to articles</b><br/><i>How:</i> normalize to lowercase alphanumeric,<br/>try exact match, then substring match<br/><i>Returns:</i> matched pairs + unmatched remainder"]
+
+    S3 -->|"matched + unmatched"| S4
+
+    S4["<b>4. Write markdown files</b><br/><i>Phase a:</i> entity + matched block &rarr; full article<br/><i>Phase b:</i> unmatched block &rarr; infer type from DB, write<br/><i>Phase c:</i> unmatched entity &rarr; stub from context text<br/><br/><i>Each file:</i> YAML front matter + body<br/><i>Path:</i> wiki/entity_type/slug.md"]
+
+    S4 --> OUT["<b>Output:</b> written article paths"]
+
+    %% Styling
+    classDef deterministic fill:#5cb85c,stroke:#3d8b3d,color:#fff
+
+    class S1,S2,S3,S4 deterministic
+```
+
+---
+
+## Summary Tables
 
 | Stage | Type | Tools | Input | Output |
 |-------|------|-------|-------|--------|
-| **Researcher** | LLM (ReAct agent) | 8 | Page text + image | Classification + entities in DB |
+| **Researcher** | ReAct LLM | 8 | Page text + image | Classification + entities in DB |
 | **Router** | Deterministic | 0 | ToolMessage from classify | `"writer"` or `END` |
-| **Writer** | LLM (ReAct agent) | 4 | Researcher messages | `=== ARTICLE ===` delimited blocks |
+| **Writer** | ReAct LLM | 4 | Researcher messages | `=== ARTICLE ===` delimited blocks |
 | **Editor** | Deterministic Python | 0 | All messages + DB entities | Markdown files in `wiki/` |
 
-## Article Writing Strategy (Editor)
-
-1. **Parse** writer output for `=== ARTICLE: Name === ... === END ARTICLE ===` blocks
-2. **Fallback** to markdown heading parsing (`# Name`) if no delimiters found
-3. **Filter** meta-content headings (entity summaries, page analysis, etc.)
-4. **Match** DB entities to article blocks using normalized fuzzy matching
-5. **Phase 1**: Write files for entities with matching writer content
-6. **Phase 2**: Write files for unmatched article blocks (infer type from DB or body text)
-7. **Stubs**: Create minimal articles for entities with no writer match (using entity context)
-
-## Entity Quality Filters
-
-- Masthead roles (editor, publisher, photographer, etc.) with short context are excluded
-- Canonical type normalization (`organisations` -> `organisation`, `people` -> `person`)
-- Duplicate detection via `search_entities` and `search_article_files`
-
-## LLM Backend
+### LLM Backend
 
 Controlled by `USE_OLLAMA` env var:
 
