@@ -19,9 +19,13 @@ if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sh
 fi
 if ! docker compose version >/dev/null 2>&1; then
-    log "installing docker compose plugin"
-    $APT update
-    $APT install -y docker-compose-plugin
+    log "installing docker compose plugin (standalone binary)"
+    install -d /usr/libexec/docker/cli-plugins
+    arch="$(uname -m)"
+    curl -fsSL \
+        "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${arch}" \
+        -o /usr/libexec/docker/cli-plugins/docker-compose
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 fi
 
 # 2. NVIDIA Container Toolkit
