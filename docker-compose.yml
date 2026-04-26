@@ -39,6 +39,7 @@ services:
       - ./judge:/workspace/judge
       - ./data/val/truth:/workspace/data/val/truth:ro
       - ./trends:/workspace/trends
+    restart: unless-stopped
     command: ["python", "-m", "judge.judge"]
 
   developer-agent:

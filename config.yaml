@@ -1,6 +1,6 @@
 # ----- Project identity -----
 repo:
-  url:             "git@github.com:USER/REPO.git"   # FILL IN before first run
+  url:             "git@github.com:alastairrushworth/pdf-tools.git"   # FILL IN before first run
   branch:          "agent"
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
@@ -17,9 +17,9 @@ digitalocean:
 #  - vision: multimodal, drives the translator's per-page extraction
 # Embedding stays loaded alongside.
 models:
-  coder:     "qwen3-coder:32b"
-  vision:    "qwen2.5vl:32b"
-  judge:     "qwen3-coder:32b"        # same family as coder; different prompt
+  coder:     "qwen3.6:27b-coding-mxfp8"
+  vision:    "qwen3.6:35b"
+  judge:     "qwen3.6:27b-coding-mxfp8"        # same family as coder; different prompt
   embedding: "nomic-embed-text"
 
 # ----- Iteration control -----

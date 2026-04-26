@@ -7,6 +7,5 @@ __pycache__/
 judge/inbox/*.json
 judge/feedback/*.json
 data/test/predictions/
-secrets/deploy_key
-secrets/deploy_key.pub
 .venv/
+secrets/

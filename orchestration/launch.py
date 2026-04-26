@@ -163,7 +163,7 @@ def up() -> int:
         remote_cmd = (
             f"set -e; cd /workspace && "
             f"git fetch origin && git checkout {branch} && git pull --ff-only && "
-            f"docker compose up --build --abort-on-container-exit developer-agent"
+            f"docker compose up --build --exit-code-from developer-agent"
         )
         rc = _ssh_run(ip, remote_cmd)
         return rc

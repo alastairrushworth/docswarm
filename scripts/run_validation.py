@@ -105,6 +105,30 @@ def _append_trend(cfg: dict, entry: dict) -> Path:
     return p
 
 
+def _ensure_git_ssh(cfg: dict) -> None:
+    """Make `git push` work over SSH from inside the container.
+
+    Reads `repo.deploy_key_path` from config (default /secrets/deploy_key),
+    copies it to a writable path with 0600 perms, and sets GIT_SSH_COMMAND.
+    """
+    if os.environ.get("GIT_SSH_COMMAND"):
+        return
+    src = Path(cfg.get("repo", {}).get("deploy_key_path", "/secrets/deploy_key"))
+    if not src.is_file():
+        logger.info("no deploy key at %s; git push will likely fail", src)
+        return
+    dst = Path("/tmp/deploy_key")
+    try:
+        dst.write_bytes(src.read_bytes())
+        os.chmod(dst, 0o600)
+    except OSError as e:
+        logger.warning("could not stage deploy key: %s", e)
+        return
+    os.environ["GIT_SSH_COMMAND"] = (
+        f"ssh -i {dst} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    )
+
+
 def _git(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True)
 
@@ -239,9 +263,8 @@ def _run_developer_agent(cfg: dict, round_n: int, prev_entry: dict) -> None:
         "claude", "--print",
         "--permission-mode", "bypassPermissions",
         "--model", model,
-        prompt,
     ]
-    rc = subprocess.run(cmd, cwd=ROOT, check=False).returncode
+    rc = subprocess.run(cmd, cwd=ROOT, check=False, input=prompt, text=True).returncode
     if rc != 0:
         logger.warning("claude exited with code %d", rc)
 
@@ -255,6 +278,8 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = _load_cfg()
+    if not args.no_git:
+        _ensure_git_ssh(cfg)
     iter_cfg = cfg.get("iteration", {})
     wall_clock_s = float(iter_cfg.get("wall_clock_hours", 12)) * 3600
     epsilon = float(iter_cfg.get("epsilon", 0.005))

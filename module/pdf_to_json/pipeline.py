@@ -153,7 +153,8 @@ def pdf_to_json(pdf_path: str) -> dict:
     page_concurrency = max(1, int(get("iteration.page_concurrency", 4)))
     model = get("models.vision")
     if not model:
-        raise RuntimeError("config.models.vision is required")
+        warnings.warn("config.models.vision is missing; returning empty document")
+        return empty_document().model_dump(mode="json")
 
     p = Path(pdf_path)
     if not p.is_file():
