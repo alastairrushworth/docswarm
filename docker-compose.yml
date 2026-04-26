@@ -1,22 +1,14 @@
 services:
-  ollama-translator:
+  ollama-main:
     image: ollama/ollama:latest
-    container_name: ollama-translator
+    container_name: ollama-main
     networks: [docswarm]
     volumes:
-      - ollama-translator-data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
-  ollama-judge:
-    image: ollama/ollama:latest
-    container_name: ollama-judge
-    networks: [docswarm]
-    volumes:
-      - ollama-judge-data:/root/.ollama
+      - ollama-main-data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=8
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_CONTEXT_LENGTH=65536
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -30,11 +22,11 @@ services:
     container_name: judge
     networks: [docswarm]
     depends_on:
-      ollama-judge:
+      ollama-main:
         condition: service_healthy
     environment:
       - DOCSWARM_CONFIG=/workspace/config.yaml
-      - OLLAMA_JUDGE_URL=http://ollama-judge:11434
+      - OLLAMA_JUDGE_URL=http://ollama-main:11434
     volumes:
       - ./config.yaml:/workspace/config.yaml:ro
       - ./judge:/workspace/judge
@@ -49,13 +41,19 @@ services:
     container_name: developer-agent
     networks: [docswarm]
     depends_on:
-      ollama-translator:
+      ollama-main:
         condition: service_healthy
       judge:
         condition: service_started
     environment:
       - DOCSWARM_CONFIG=/workspace/config.yaml
-      - OLLAMA_TRANSLATOR_URL=http://ollama-translator:11434
+      # Translator/judge HTTP clients use these; both point at the single Ollama.
+      - OLLAMA_URL=http://ollama-main:11434
+      - OLLAMA_JUDGE_URL=http://ollama-main:11434
+      # Claude Code → local Ollama via Anthropic-compatible API.
+      - ANTHROPIC_BASE_URL=http://ollama-main:11434
+      - ANTHROPIC_AUTH_TOKEN=ollama
+      - ANTHROPIC_API_KEY=
     volumes:
       # Selective mounts for non-leakage. data/val/truth and data/test
       # are deliberately NOT mounted into this container.
@@ -80,5 +78,4 @@ networks:
     driver: bridge
 
 volumes:
-  ollama-translator-data:
-  ollama-judge-data:
+  ollama-main-data:

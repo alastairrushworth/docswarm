@@ -20,7 +20,9 @@ run-local:
 	bash orchestration/run.sh local
 
 run-local-fast:
-	DOCSWARM_MODE=local python scripts/run_local_fast.py
+	@echo "LOCAL FAST: docker stack with stubbed Ollama (canned responses)."
+	@echo "Verifies wiring, not model quality. Target: <60s."
+	python scripts/run_local_fast.py
 
 build-snapshot:
 	python orchestration/provision.py build-snapshot

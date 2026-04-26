@@ -11,7 +11,7 @@ from .config import get
 
 
 def _url() -> str:
-    return get("ollama.translator_url", "http://localhost:11434").rstrip("/")
+    return get("ollama.url", "http://localhost:11434").rstrip("/")
 
 
 def _b64_image(path: str | Path) -> str:

@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 from . import broad, marking
-from .leakage_filter import collect_truth_strings, filter_hints
+from .leakage_filter import collect_truth_strings, filter_hints, overlap_ratio
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("judge")
@@ -73,13 +73,19 @@ def handle(req: dict[str, Any], cfg: dict) -> dict[str, Any]:
         }
 
     if mode == "marking":
-        scope = req.get("scope") or {}
-        result = marking.evaluate(prediction, truth, scope)
-        result["hints"] = filter_hints(result.get("hints", []), truth_strings, threshold)
+        result = marking.evaluate(prediction, truth, req)
+        feedback = result.get("feedback", "")
+        if feedback and overlap_ratio(feedback, truth_strings) >= threshold:
+            logger.warning(
+                "marking feedback redacted for high overlap: %.200s", feedback
+            )
+            result["feedback"] = "[redacted: overlapped with ground truth]"
+            result["verdict"] = "unverifiable"
         return {
             "mode": "marking",
             "pdf_id": pdf_id,
-            "scope": scope,
+            "question": req.get("question", ""),
+            "focus_path": (req.get("focus") or {}).get("path", ""),
             **result,
         }
 

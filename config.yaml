@@ -7,23 +7,26 @@ repo:
 digitalocean:
   api_token_env:   "DO_API_TOKEN"                   # name of env var holding the token
   region:          "nyc2"
-  size:            "gpu-h100x1-80gb"
+  size:            "gpu-h200x1-141gb"
   snapshot_id:     ""                               # FILL IN after first `make build-snapshot`
 
 # ----- Models (Ollama tags) -----
-# Agent may revise these in early rounds and commit the change.
+# Same big multimodal model serves the developer agent (Claude Code via Ollama's
+# Anthropic-compatible API), the translator's vision/text passes, and the
+# judge's freeform marking. Different prompts, same model. Embedding is small
+# and stays loaded alongside.
 models:
-  vision_small: "llama3.2-vision:11b"
-  vision_large: "minicpm-v:latest"
-  text_small:   "llama3.2:3b"
-  text_large:   "qwen2.5:32b"
-  judge:        "mistral:7b"
+  coder:        "qwen3-coder:32b"        # also used as translator + judge LLM
+  translator:   "qwen3-coder:32b"
+  judge:        "qwen3-coder:32b"
   embedding:    "nomic-embed-text"
 
 # ----- Iteration control -----
 iteration:
   wall_clock_hours:           12
   page_budget_seconds:        30
+  page_concurrency:           4          # parallel page extractions per PDF
+  pdf_concurrency:            3          # parallel PDFs in a broad round
   epsilon:                    0.005
   min_rounds_before_plateau:  3
   plateau_aggregate_floor:    0.30
@@ -44,10 +47,12 @@ leakage:
   allow_structural_hints:        true
   hint_overlap_filter_threshold: 0.30
 
-# ----- Ollama endpoints (resolved by service name on the docker network) -----
+# ----- Single Ollama instance, shared by translator + agent + judge -----
 ollama:
-  translator_url: "http://ollama-translator:11434"
-  judge_url:      "http://ollama-judge:11434"
+  url:           "http://ollama-main:11434"
+  num_parallel:  8                         # OLLAMA_NUM_PARALLEL on the server
+  keep_alive:    "24h"                     # default model keep-alive
+  context_length: 65536                    # Claude Code requires ≥64k
 
 # ----- Paths (inside containers) -----
 paths:
@@ -64,7 +69,10 @@ paths:
 # ----- Local mode overrides -----
 local:
   models:
-    vision_large: null
-    text_large:   null
+    coder:      "qwen3-coder:7b"
+    translator: "qwen3-coder:7b"
+    judge:      "qwen3-coder:7b"
   iteration:
     wall_clock_hours: 1
+    page_concurrency: 2
+    pdf_concurrency: 1

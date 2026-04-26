@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -122,10 +123,20 @@ def _component_summary(components: dict[str, float]) -> str:
 def _model_loadout(cfg: dict) -> str:
     m = cfg.get("models", {})
     parts = []
-    for k in ("vision_large", "vision_small", "text_large", "text_small", "judge"):
+    for k in ("coder", "translator", "judge", "embedding"):
         if m.get(k):
             parts.append(f"{k}={m[k]}")
     return ", ".join(parts)
+
+
+def _translate_and_submit(cfg: dict, round_n: int, p: Path) -> dict:
+    pid = _pdf_id(p)
+    logger.info("round %d: translating %s", round_n, pid)
+    prediction = pdf_to_json(str(p))
+    logger.info("round %d: submitting broad eval for %s", round_n, pid)
+    fb = _submit_broad(cfg, pid, round_n, prediction)
+    logger.info("round %d: %s aggregate=%.3f", round_n, pid, fb.get("aggregate", 0.0))
+    return fb
 
 
 def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
@@ -133,18 +144,23 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
     if not pdfs:
         raise SystemExit(f"no validation PDFs found in {cfg['paths']['val_pdfs_dir']}")
 
-    t0 = time.monotonic()
-    feedbacks: list[dict] = []
-    marking_calls = 0
-    for p in pdfs:
-        pid = _pdf_id(p)
-        logger.info("round %d: translating %s", round_n, pid)
-        prediction = pdf_to_json(str(p))
-        logger.info("round %d: submitting broad eval for %s", round_n, pid)
-        fb = _submit_broad(cfg, pid, round_n, prediction)
-        feedbacks.append(fb)
-        logger.info("round %d: %s aggregate=%.3f", round_n, pid, fb.get("aggregate", 0.0))
+    pdf_concurrency = max(1, int(cfg.get("iteration", {}).get("pdf_concurrency", 1)))
 
+    t0 = time.monotonic()
+    feedbacks_by_pdf: dict[str, dict] = {}
+    marking_calls = 0
+
+    with ThreadPoolExecutor(max_workers=pdf_concurrency) as ex:
+        futs = {ex.submit(_translate_and_submit, cfg, round_n, p): p for p in pdfs}
+        for fut in as_completed(futs):
+            p = futs[fut]
+            try:
+                feedbacks_by_pdf[_pdf_id(p)] = fut.result()
+            except Exception as e:
+                logger.warning("round %d: %s failed: %s", round_n, _pdf_id(p), e)
+                feedbacks_by_pdf[_pdf_id(p)] = {"aggregate": 0.0, "components": {}}
+
+    feedbacks = [feedbacks_by_pdf[_pdf_id(p)] for p in pdfs]
     agg = _aggregate_per_pdf(feedbacks)
     elapsed = time.monotonic() - t0
 

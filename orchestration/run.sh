@@ -10,7 +10,7 @@ case "$MODE" in
   local)
     echo ">>> bringing up local stack (plumbing only)"
     docker compose -f docker-compose.yml -f docker-compose.local.yml up --build -d \
-        ollama-translator ollama-judge judge
+        ollama-main judge
     docker compose -f docker-compose.yml -f docker-compose.local.yml run --rm \
         -e DOCSWARM_MODE=local \
         developer-agent \
@@ -32,7 +32,7 @@ case "$MODE" in
     ssh -t -o StrictHostKeyChecking=accept-new "root@${DROPLET_IP}" \
         "cd /workspace && git pull && \
          docker compose -f docker-compose.yml -f docker-compose.remote.yml up --build -d \
-            ollama-translator ollama-judge judge && \
+            ollama-main judge && \
          docker compose -f docker-compose.yml -f docker-compose.remote.yml run --rm \
             developer-agent python scripts/run_validation.py"
     ;;

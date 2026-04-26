@@ -1,19 +1,21 @@
 FROM python:3.11-slim
 
+# System tools + Node (for Claude Code).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         curl \
         ca-certificates \
         openssh-client \
+        gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code CLI (developer agent's brain).
-# Installed in the snapshot so the container starts cold-fast on the H100.
-RUN curl -fsSL https://claude.ai/install.sh | sh || true
+# Claude Code CLI — points at local Ollama via ANTHROPIC_BASE_URL set by compose.
+RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /workspace
 
-COPY module/pyproject.toml /tmp/module-pyproject.toml
 RUN pip install --no-cache-dir \
     pydantic>=2.6 \
     pyyaml>=6.0 \

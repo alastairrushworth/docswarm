@@ -1,19 +1,28 @@
-"""Top-level pdf_to_json pipeline.
+"""STARTER pdf_to_json pipeline — replace freely.
 
-Internals are the agent's design space (DESIGN.md §7). This is a working baseline:
-render each PDF page to PNG, query a vision model with a structured-extraction prompt,
-parse JSON, then assemble. Caches per-page IR by content hash.
+This file exists so round 1 can produce *some* score. It is NOT the recommended
+architecture. The translator is expected to be LLM-heavy and agentic: multi-pass
+extraction, specialist sub-modules, model routing, self-checks. Single vision
+call per page is unlikely to be sufficient.
+
+The fixed contract is:
+- the public function name and signature: `pdf_to_json(pdf_path: str) -> dict`
+- the schema source-of-truth in `schema.py`
+- the per-page time budget from `config.iteration.page_budget_seconds`
+- content-hash cache keying
+
+Everything else here — prompts, model routing, page rendering, stitching — is
+yours to delete and replace. See AGENT.md "What is fixed vs what you design".
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
-import signal
 import tempfile
 import time
 import warnings
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -57,29 +66,6 @@ Currency values stay as strings (e.g. "$2.00").
 """
 
 
-class _Timeout(Exception):
-    pass
-
-
-@contextmanager
-def _deadline(seconds: int):
-    """SIGALRM-based deadline; falls back to a no-op if SIGALRM is unavailable."""
-    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
-        yield
-        return
-
-    def handler(signum, frame):  # noqa: ARG001
-        raise _Timeout()
-
-    prev = signal.signal(signal.SIGALRM, handler)
-    signal.alarm(seconds)
-    try:
-        yield
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, prev)
-
-
 def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int = 200) -> Path:
     page = doc.load_page(page_index)
     pix = page.get_pixmap(dpi=dpi)
@@ -116,16 +102,12 @@ def _extract_page(
         return cached
 
     try:
-        with _deadline(budget_seconds):
-            raw = ollama_client.generate(
-                model=model,
-                prompt=_VISION_PROMPT,
-                images=[image_path],
-                timeout=float(budget_seconds),
-            )
-    except _Timeout:
-        warnings.warn(f"page {page_index + 1}: vision call exceeded {budget_seconds}s budget")
-        return {}
+        raw = ollama_client.generate(
+            model=model,
+            prompt=_VISION_PROMPT,
+            images=[image_path],
+            timeout=float(budget_seconds),
+        )
     except Exception as e:
         warnings.warn(f"page {page_index + 1}: vision call failed: {e}")
         return {}
@@ -169,7 +151,8 @@ def pdf_to_json(pdf_path: str) -> dict:
     Always returns *some* JSON — best effort on timeout or extraction failure.
     """
     page_budget = int(get("iteration.page_budget_seconds", 30))
-    model = get("models.vision_small", "llama3.2-vision:11b")
+    page_concurrency = max(1, int(get("iteration.page_concurrency", 4)))
+    model = get("models.translator", "qwen3-coder:32b")
 
     p = Path(pdf_path)
     if not p.is_file():
@@ -188,24 +171,40 @@ def pdf_to_json(pdf_path: str) -> dict:
     meta_ir: dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory() as tmp:
+        rendered: dict[int, Path] = {}
         for i in range(doc.page_count):
             img = Path(tmp) / f"page_{i:03d}.png"
             try:
                 _render_page(doc, i, img)
+                rendered[i] = img
             except Exception as e:
                 warnings.warn(f"page {i + 1}: render failed: {e}")
-                continue
 
-            t0 = time.monotonic()
-            page_ir = _extract_page(pdf_hash, i, img, model, page_budget)
-            elapsed = time.monotonic() - t0
-            logger.info("page %d/%d: extracted in %.1fs", i + 1, doc.page_count, elapsed)
+        results: dict[int, dict[str, Any]] = {}
+        t0 = time.monotonic()
+        with ThreadPoolExecutor(max_workers=page_concurrency) as ex:
+            futs = {
+                ex.submit(_extract_page, pdf_hash, i, img, model, page_budget): i
+                for i, img in rendered.items()
+            }
+            for fut in as_completed(futs):
+                i = futs[fut]
+                try:
+                    results[i] = fut.result()
+                except Exception as e:
+                    warnings.warn(f"page {i + 1}: extraction errored: {e}")
+                    results[i] = {}
+        logger.info(
+            "extracted %d pages in %.1fs (concurrency=%d)",
+            len(results), time.monotonic() - t0, page_concurrency,
+        )
 
+        for i in sorted(results):
+            page_ir = results[i]
             if page_ir.get("is_first_page") and not meta_ir:
                 m = page_ir.get("magazine")
                 if isinstance(m, dict):
                     meta_ir = m
-
             per_page.append((i + 1, page_ir))
 
     doc.close()
