@@ -204,10 +204,17 @@ def up() -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
+    print(">>> waiting for sshd")
+    _wait_for_ssh(ip)
+
     try:
         remote_cmd = (
             f"set -e; cd /workspace && "
             f"git fetch origin && git checkout {branch} && git pull --ff-only && "
+            # Heal snapshots that were built before setup.sh installed the
+            # compose plugin. Idempotent and cheap (~1s) when already present.
+            f"docker compose version >/dev/null 2>&1 || "
+            f"  (apt-get update && apt-get install -y docker-compose-plugin) && "
             f"docker compose up --build --exit-code-from developer-agent"
         )
         rc = _ssh_run(ip, remote_cmd)
