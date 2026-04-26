@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "Article": {
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "text": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Text",
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "kind": {
+          "default": "prose",
+          "enum": [
+            "prose",
+            "verse"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "text",
+        "pages"
+      ],
+      "title": "Article",
+      "type": "object"
+    },
+    "Cost": {
+      "properties": {
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "annual": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Annual"
+        },
+        "semiannual": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Semiannual"
+        }
+      },
+      "title": "Cost",
+      "type": "object"
+    },
+    "Issue": {
+      "properties": {
+        "date": {
+          "format": "date",
+          "title": "Date",
+          "type": "string"
+        },
+        "volume": {
+          "title": "Volume",
+          "type": "integer"
+        },
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "volume",
+        "number"
+      ],
+      "title": "Issue",
+      "type": "object"
+    },
+    "MagazineMeta": {
+      "properties": {
+        "editor": {
+          "title": "Editor",
+          "type": "string"
+        },
+        "issue": {
+          "$ref": "#/$defs/Issue"
+        },
+        "publisher": {
+          "$ref": "#/$defs/Publisher"
+        },
+        "cost": {
+          "$ref": "#/$defs/Cost"
+        }
+      },
+      "required": [
+        "editor",
+        "issue",
+        "publisher",
+        "cost"
+      ],
+      "title": "MagazineMeta",
+      "type": "object"
+    },
+    "Publisher": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "address": {
+          "title": "Address",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "address"
+      ],
+      "title": "Publisher",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "magazine": {
+      "$ref": "#/$defs/MagazineMeta"
+    },
+    "articles": {
+      "items": {
+        "$ref": "#/$defs/Article"
+      },
+      "title": "Articles",
+      "type": "array"
+    }
+  },
+  "required": [
+    "magazine",
+    "articles"
+  ],
+  "title": "Document",
+  "type": "object"
+}

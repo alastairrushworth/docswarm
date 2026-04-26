@@ -1,34 +1,11 @@
-# Python
+.cache/
+.droplet_id
+.droplet_ip
 __pycache__/
 *.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-*.egg
-*.wal
-# Environment
-.env
-
-# Testing
 .pytest_cache/
-
-# Generated data
-docswarm_catalog.db
-pages/
-docswarm_data/
-wiki/
-logs/
-
-# Input documents (large binaries)
-pdfs/
-
-# Scratch scripts
-scratch_*.py
-
-# OS
-.DS_Store
-
-# IDE
-.vscode/
-.idea/
+judge/inbox/*.json
+judge/feedback/*.json
+data/test/predictions/
+.venv/
+secrets/

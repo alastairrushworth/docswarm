@@ -1,0 +1,78 @@
+# ----- Project identity -----
+repo:
+  url:             "git@github.com:alastairrushworth/docswarm.git"
+  branch:          "development"
+  deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
+
+digitalocean:
+  region:         "nyc2"
+  size:           "gpu-h200x1-141gb"          # the iteration-loop droplet
+  snapshot_id:    ""                          # auto-filled by `make snapshot`
+  ssh_key_id:     "55897353"                          # `doctl compute ssh-key list` → ID
+  droplet_name:   "docswarm-h200"
+  # ----- Snapshot setup (`make snapshot`) -----
+  # The setup droplet just downloads ~60GB of model weights and installs
+  # Docker / NVIDIA toolkit / Ollama. It must be a GPU SKU available in the
+  # chosen region so the snapshot inherits NVIDIA drivers. As of 2026,
+  # H200 is the only GPU SKU in nyc2/atl1; H100 isn't available anywhere on DO.
+  snapshot_size:  "gpu-h200x1-141gb"          # same as run size; ~$3.50 for one setup
+  snapshot_image: "gpu-h100x1-base"           # NVIDIA AI/ML Ready image (works on H200)
+
+# ----- Models (Ollama tags) -----
+# Two Ollama models loaded concurrently in a single Ollama server:
+#  - coder: drives Claude Code (developer agent) and the judge LLM (marking)
+#  - vision: multimodal, drives the translator's per-page extraction
+# Embedding stays loaded alongside.
+models:
+  # qwen3.6:35b is multimodal (Text + Image), 24GB, 256K ctx — one model
+  # covers all three roles. The `27b-coding-*` and `*-mlx-*` tags are MLX
+  # (Apple Silicon only) and will 412 on Linux.
+  coder:     "qwen3.6:35b"
+  vision:    "qwen3.6:35b"            # same model serves both roles
+  judge:     "qwen3.6:35b"
+  embedding: "nomic-embed-text"       # ~270MB, similarity scoring
+
+# ----- Iteration control -----
+iteration:
+  wall_clock_hours:           12
+  page_concurrency:           4          # parallel page extractions per PDF
+  pdf_concurrency:            3          # parallel PDFs in a broad round
+  epsilon:                    0.005
+  min_rounds_before_plateau:  3
+  plateau_aggregate_floor:    0.30
+  plateau_window:             3
+
+# ----- Broad-mode scoring weights (sum to 1.0) -----
+weights:
+  schema_validity: 0.10
+  article_count:   0.10
+  metadata:        0.15
+  titles:          0.15
+  text:            0.30
+  order:           0.10
+  pages:           0.10
+
+# ----- Judge: non-leakage policy -----
+leakage:
+  allow_structural_hints:        true
+  hint_overlap_filter_threshold: 0.30
+
+# ----- Single Ollama instance, two models loaded, shared by translator + agent + judge -----
+ollama:
+  url:                "http://ollama-main:11434"
+  num_parallel:       4                  # OLLAMA_NUM_PARALLEL on the server
+  max_loaded_models:  2                  # qwen3.6:35b (multimodal) + embedding
+  keep_alive:         "24h"
+  context_length:     65536              # Claude Code requires ≥64k
+
+# ----- Paths (inside containers) -----
+paths:
+  workspace:        "/workspace"
+  train_dir:        "/workspace/data/train"
+  val_pdfs_dir:     "/workspace/data/val/pdfs"
+  val_truth_dir:    "/workspace/data/val/truth"   # judge container only
+  test_dir:         "/workspace/data/test"        # final user review only
+  inbox_dir:        "/workspace/judge/inbox"
+  feedback_dir:     "/workspace/judge/feedback"
+  trends_file:      "/workspace/trends/round_history.json"
+  cache_dir:        "/workspace/.cache/pdf_to_json"

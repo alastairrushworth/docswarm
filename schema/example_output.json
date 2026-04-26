@@ -1,0 +1,27 @@
+{
+  "magazine": {
+    "editor": "L. J. Berger",
+    "issue": {"date": "1892-06-03", "volume": 5, "number": 18},
+    "publisher": {"name": "N. H. Van Sicklen", "address": "57 Plymouth Place, Chicago"},
+    "cost": {"issue": null, "annual": "$2.00", "semiannual": "$1.00"}
+  },
+  "articles": [
+    {
+      "title": "That's So!",
+      "text": ["It is not always the man who rides the swiftest..."],
+      "pages": [1],
+      "kind": "prose"
+    },
+    {
+      "title": "Both Were Pleased.",
+      "text": [
+        "The haughty rider to Heaven gave thanks",
+        "He \"was not made like other men.\"",
+        "And riders who viewed his skinny shanks",
+        "Pleased at the truth, gave thanks again!"
+      ],
+      "pages": [1],
+      "kind": "verse"
+    }
+  ]
+}

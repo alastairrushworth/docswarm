@@ -1,0 +1,89 @@
+services:
+  ollama-main:
+    image: ollama/ollama:latest
+    container_name: ollama-main
+    networks: [docswarm]
+    volumes:
+      - ollama-main-data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_CONTEXT_LENGTH=65536
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  judge:
+    build:
+      context: .
+      dockerfile: docker/judge.Dockerfile
+    container_name: judge
+    networks: [docswarm]
+    depends_on:
+      ollama-main:
+        condition: service_healthy
+    environment:
+      - DOCSWARM_CONFIG=/workspace/config.yaml
+    volumes:
+      - ./config.yaml:/workspace/config.yaml:ro
+      - ./judge:/workspace/judge
+      - ./data/val/truth:/workspace/data/val/truth:ro
+      - ./trends:/workspace/trends
+    restart: unless-stopped
+    command: ["python", "-m", "judge.judge"]
+
+  developer-agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: developer-agent
+    networks: [docswarm]
+    depends_on:
+      ollama-main:
+        condition: service_healthy
+      judge:
+        condition: service_started
+    environment:
+      - DOCSWARM_CONFIG=/workspace/config.yaml
+      # Translator HTTP client.
+      - OLLAMA_URL=http://ollama-main:11434
+      # Claude Code → local Ollama via Anthropic-compatible API.
+      - ANTHROPIC_BASE_URL=http://ollama-main:11434
+      - ANTHROPIC_AUTH_TOKEN=ollama
+      - ANTHROPIC_API_KEY=
+    volumes:
+      # Selective mounts for non-leakage. data/val/truth and data/test
+      # are deliberately NOT mounted into this container.
+      - ./module:/workspace/module
+      - ./judge/inbox:/workspace/judge/inbox
+      - ./judge/feedback:/workspace/judge/feedback:ro
+      - ./scripts:/workspace/scripts
+      - ./trends:/workspace/trends
+      - ./orchestration:/workspace/orchestration
+      - ./config.yaml:/workspace/config.yaml
+      - ./AGENT.md:/workspace/AGENT.md:ro
+      - ./DESIGN.md:/workspace/DESIGN.md:ro
+      - ./Makefile:/workspace/Makefile:ro
+      - ./data/train:/workspace/data/train:ro
+      - ./data/val/pdfs:/workspace/data/val/pdfs:ro
+      - ./.git:/workspace/.git
+      - ./secrets:/secrets:ro
+    working_dir: /workspace
+    command: ["python", "scripts/run_validation.py"]
+
+networks:
+  docswarm:
+    driver: bridge
+
+volumes:
+  ollama-main-data:
