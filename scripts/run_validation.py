@@ -1,7 +1,13 @@
-"""Iteration loop: translate val PDFs, submit broad to judge, commit, push, repeat.
+"""Iteration loop on the droplet:
+  round 1:           translate val PDFs (starter pipeline) → broad eval → commit
+  round n (n>1):     invoke Claude Code with prior-round feedback → it edits code
+                     and commits → harness re-runs broad eval
 
-The "developer agent" work — code edits, marking probes — happens *outside* this loop
-(via Claude Code in the developer-agent container). This script is the harness.
+Claude Code is the developer agent. Between rounds the harness shells out to
+`claude --print --permission-mode bypassPermissions` with a brief prompt that
+hands the agent the latest broad feedback. Claude reads AGENT.md / DESIGN.md
+itself, runs marking probes if useful, edits files in module/pdf_to_json/, and
+commits before exiting. The harness then re-runs the broad evaluation.
 """
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -116,14 +123,19 @@ def _commit_and_push(cfg: dict, message: str) -> None:
         logger.warning("git operation failed: %s\n%s", e, e.stderr)
 
 
-def _component_summary(components: dict[str, float]) -> str:
-    return ", ".join(f"{k} {v:.2f}" for k, v in components.items())
+def _component_short(entry: dict) -> str:
+    c = entry["components"]
+    return (
+        f"titles {c['titles']:.2f}, text {c['text']:.2f}, order {c['order']:.2f}, "
+        f"meta {c['metadata']:.2f}, count {c['article_count']:.2f}, "
+        f"schema {c['schema_validity']:.2f}, pages {c['pages']:.2f}"
+    )
 
 
 def _model_loadout(cfg: dict) -> str:
     m = cfg.get("models", {})
     parts = []
-    for k in ("coder", "translator", "judge", "embedding"):
+    for k in ("coder", "vision", "judge", "embedding"):
         if m.get(k):
             parts.append(f"{k}={m[k]}")
     return ", ".join(parts)
@@ -148,7 +160,6 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
 
     t0 = time.monotonic()
     feedbacks_by_pdf: dict[str, dict] = {}
-    marking_calls = 0
 
     with ThreadPoolExecutor(max_workers=pdf_concurrency) as ex:
         futs = {ex.submit(_translate_and_submit, cfg, round_n, p): p for p in pdfs}
@@ -170,10 +181,13 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
         "wall_clock_seconds": round(elapsed, 1),
         "aggregate": round(agg["aggregate"], 4),
         "components": {k: round(v, 4) for k, v in agg["components"].items()},
-        "marking_calls_in_round": marking_calls,
         "model_loadout": _model_loadout(cfg),
         "per_pdf": [
             {"pdf_id": _pdf_id(p), "aggregate": fb.get("aggregate", 0.0)}
+            for p, fb in zip(pdfs, feedbacks)
+        ],
+        "categorical_errors_per_pdf": [
+            {"pdf_id": _pdf_id(p), "errors": fb.get("categorical_errors", [])}
             for p, fb in zip(pdfs, feedbacks)
         ],
     }
@@ -181,19 +195,63 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
     return entry
 
 
-def _component_short(entry: dict) -> str:
-    c = entry["components"]
-    return (
-        f"titles {c['titles']:.2f}, text {c['text']:.2f}, order {c['order']:.2f}, "
-        f"meta {c['metadata']:.2f}, count {c['article_count']:.2f}, "
-        f"schema {c['schema_validity']:.2f}, pages {c['pages']:.2f}"
-    )
+def _developer_agent_prompt(round_n: int, prev_entry: dict) -> str:
+    components = prev_entry.get("components", {})
+    per_pdf = prev_entry.get("per_pdf", [])
+    cat_errors = prev_entry.get("categorical_errors_per_pdf", [])
+    return f"""You are the developer agent for docswarm. This is round {round_n}.
+
+Read AGENT.md first if you have not. The deliverable is `module/pdf_to_json/`;
+the public entry point `pdf_to_json(pdf_path: str) -> dict` is fixed but
+everything inside is yours to rewrite.
+
+Previous broad-eval summary (round {round_n - 1}):
+- aggregate (weighted mean across val PDFs): {prev_entry.get('aggregate', 0.0):.3f}
+- components: {json.dumps(components)}
+- per-pdf aggregates: {json.dumps(per_pdf)}
+- categorical errors per pdf: {json.dumps(cat_errors)}
+
+Your task this turn:
+1. Identify the weakest component(s) and form a hypothesis.
+2. Optionally probe the judge in marking mode by writing JSON to
+   `judge/inbox/{{pdf_id}}__marking__{{tag}}.json` and reading the matching
+   file from `judge/feedback/`. Marking shape is in AGENT.md.
+3. Edit code in `module/pdf_to_json/` (or add new files there) to address
+   the weakness. Keep the public entry point and schema source-of-truth.
+4. Run `python scripts/run_test_smoke.py` if it exists, or write a quick
+   unit test, before committing.
+5. `git add` your changes, commit with a clear message, and exit.
+
+The harness will run the next broad evaluation as soon as you exit. Do NOT
+attempt to run broad eval yourself. Do NOT read `data/val/truth/` or
+`data/test/` — those are not mounted.
+"""
+
+
+def _run_developer_agent(cfg: dict, round_n: int, prev_entry: dict) -> None:
+    if shutil.which("claude") is None:
+        logger.warning("claude CLI not on PATH; skipping developer-agent turn")
+        return
+    model = cfg.get("models", {}).get("coder", "qwen3-coder:32b")
+    prompt = _developer_agent_prompt(round_n, prev_entry)
+    logger.info("round %d: invoking Claude Code (model=%s)", round_n, model)
+    cmd = [
+        "claude", "--print",
+        "--permission-mode", "bypassPermissions",
+        "--model", model,
+        prompt,
+    ]
+    rc = subprocess.run(cmd, cwd=ROOT, check=False).returncode
+    if rc != 0:
+        logger.warning("claude exited with code %d", rc)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--no-git", action="store_true", help="skip git commit/push (local mode)")
+    parser.add_argument("--no-git", action="store_true", help="skip git commit/push")
     parser.add_argument("--single-round", action="store_true", help="run one round and exit")
+    parser.add_argument("--no-agent", action="store_true",
+                        help="skip the Claude Code turn between rounds (baseline only)")
     args = parser.parse_args()
 
     cfg = _load_cfg()
@@ -209,17 +267,22 @@ def main() -> int:
     rounds_since_best = 0
     round_n = 0
     prev_aggregate = None
+    prev_entry: dict[str, Any] | None = None
 
     while time.monotonic() < deadline:
         round_n += 1
+
+        if round_n > 1 and prev_entry is not None and not args.no_agent:
+            _run_developer_agent(cfg, round_n, prev_entry)
+
         entry = run_round(cfg, round_n)
         agg = entry["aggregate"]
         delta = (agg - prev_aggregate) if prev_aggregate is not None else 0.0
-        prev_aggregate = agg
 
         message = (
-            f"round {round_n}: aggregate {agg:.3f} (Δ{delta:+.3f}); "
-            f"{_component_short(entry)}"
+            f"round {round_n}: aggregate {agg:.3f}"
+            + (f" (Δ{delta:+.3f})" if prev_aggregate is not None else " (baseline)")
+            + f"; {_component_short(entry)}"
         )
         logger.info(message)
         if not args.no_git:
@@ -230,6 +293,9 @@ def main() -> int:
             rounds_since_best = 0
         else:
             rounds_since_best += 1
+
+        prev_aggregate = agg
+        prev_entry = entry
 
         plateau_active = round_n >= min_rounds and best >= plateau_floor
         if plateau_active and rounds_since_best >= plateau_window:

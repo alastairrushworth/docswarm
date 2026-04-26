@@ -1,18 +1,19 @@
 """String / text similarity helpers.
 
-Default to a fast token-Jaccard similarity. If an Ollama embedding model is reachable,
-text similarity falls back to cosine of `nomic-embed-text` embeddings.
+Default to a fast token-Jaccard similarity. If an Ollama embedding model is
+reachable, text similarity falls back to cosine of embedding vectors.
 """
 from __future__ import annotations
 
 import logging
-import os
 import re
 from functools import lru_cache
 from typing import Any
 
 import httpx
 import numpy as np
+
+from .config import get
 
 logger = logging.getLogger("judge.similarity")
 
@@ -32,12 +33,12 @@ def jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb)
 
 
-def _judge_ollama_url() -> str:
-    return os.environ.get("OLLAMA_JUDGE_URL", "http://ollama-judge:11434").rstrip("/")
+def _ollama_url() -> str:
+    return str(get("ollama.url", "http://ollama-main:11434")).rstrip("/")
 
 
 def _embed_model() -> str:
-    return os.environ.get("JUDGE_EMBED_MODEL", "nomic-embed-text")
+    return str(get("models.embedding", "nomic-embed-text"))
 
 
 @lru_cache(maxsize=512)
@@ -47,7 +48,7 @@ def _embed(text: str) -> tuple[float, ...] | None:
         return None
     try:
         r = httpx.post(
-            f"{_judge_ollama_url()}/api/embeddings",
+            f"{_ollama_url()}/api/embeddings",
             json={"model": _embed_model(), "prompt": text},
             timeout=15.0,
         )

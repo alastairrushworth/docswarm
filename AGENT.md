@@ -14,7 +14,7 @@ You are the developer agent for this project. Read this file first, then `DESIGN
 **Fixed contract** (do not change):
 - Public entry point: `pdf_to_json(pdf_path: str) -> dict`.
 - Schema source-of-truth: `module/pdf_to_json/schema.py`.
-- Per-page wall-clock budget: `iteration.page_budget_seconds` from `config.yaml`. Module returns best-effort JSON on exhaustion; never raises.
+- The module never raises out of `pdf_to_json` — return best-effort JSON on any failure.
 - Cache keying: SHA-256 of PDF bytes (+ page + model + prompt version), not filename.
 - Submission protocol with the judge (see below).
 
@@ -30,13 +30,20 @@ You are the developer agent for this project. Read this file first, then `DESIGN
 
 The bar is whatever produces a good aggregate score. Single-prompt-per-page is a baseline, not a target.
 
-## Iteration shape within a round
+## How rounds work
 
-A round ends when you run the full `pdf_to_json` over the val set and submit broad eval to the judge. **Inside a round you have full freedom**: edit code, run unit tests, run the translator on one page or one PDF, ask the judge marking questions about specific JSON slices, iterate on prompts. Multiple rounds of marking feedback are expected before each broad submission.
+The harness (`scripts/run_validation.py`) owns the round loop. Each round:
+
+1. The harness runs `pdf_to_json` over the val set and submits broad eval to the judge.
+2. The harness commits the new `trends/round_history.json` entry.
+3. The harness invokes you (`claude --print`) with a brief that includes the round-N broad feedback.
+4. You investigate, optionally probe the judge in marking mode, edit code, commit, and exit.
+5. The harness starts round N+1.
+
+**Inside your turn you have full freedom**: edit any file under `module/pdf_to_json/`, run unit tests, run the translator on one page or one PDF, ask the judge marking questions about specific JSON slices, iterate on prompts. Do **not** attempt to run broad eval yourself or call `pdf_to_json` against the val set with intent to submit — the harness will do that as soon as you exit.
 
 - Use **marking mode** liberally — freeform questions about specific JSON slices. Cheap, frequent.
-- Run **broad mode** once per round on the full validation set. This is the gate.
-- Edit code, write tests for the new code, run them, and only when you have a hypothesis worth grading do you trigger the full re-extract + broad eval.
+- Edit code, write tests for the new code, run them. When you have something worth grading, commit and exit.
 
 ## Submission protocol (judge)
 
@@ -120,9 +127,9 @@ Cache LLM-call outputs that depend on PDF content across rounds.
 - Cache lives at `paths.cache_dir`. Helper in `module/pdf_to_json/cache.py` — feel free to extend or replace.
 - When you change a prompt, bump the prompt version so the cache invalidates cleanly.
 
-## Per-page time budget
+## Resilience
 
-The module enforces `iteration.page_budget_seconds` per page. On exhaustion, return whatever partial output is available for that page and emit a warning. The module **always** returns *some* JSON conforming (best effort) to the schema — never raise out of `pdf_to_json`.
+The module **always** returns *some* JSON conforming (best effort) to the schema — never raise out of `pdf_to_json`. On per-call timeout or extraction failure, fill what you can and continue.
 
 ## Non-leakage (you are on the receiving end)
 

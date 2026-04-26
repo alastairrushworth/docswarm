@@ -1,18 +1,23 @@
-"""Judge-side Ollama client (separate from the translator's)."""
+"""Judge-side Ollama HTTP client.
+
+Reads the Ollama URL from config.yaml (`ollama.url`) — same instance the
+translator and developer agent use. Different model tag, different prompt.
+"""
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 import httpx
 
+from .config import get
+
 logger = logging.getLogger("judge.llm")
 
 
-def _judge_url() -> str:
-    return os.environ.get("OLLAMA_JUDGE_URL", "http://ollama-judge:11434").rstrip("/")
+def _ollama_url() -> str:
+    return str(get("ollama.url", "http://ollama-main:11434")).rstrip("/")
 
 
 def chat(
@@ -37,7 +42,7 @@ def chat(
         payload["options"] = options
     if response_format_json:
         payload["format"] = "json"
-    r = httpx.post(f"{_judge_url()}/api/chat", json=payload, timeout=timeout)
+    r = httpx.post(f"{_ollama_url()}/api/chat", json=payload, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     msg = data.get("message") or {}
@@ -59,7 +64,6 @@ def chat_json(
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Recover the first {...} block.
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end != -1 and end > start:

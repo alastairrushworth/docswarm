@@ -1,31 +1,22 @@
-.PHONY: run-remote run-local run-local-fast build-snapshot test report clean help
+.PHONY: run down snapshot test report clean help
 
 help:
 	@echo "Targets:"
-	@echo "  make run-remote      # provision H100, run loop, tear down"
-	@echo "  make run-local       # local docker-compose, smoke-test plumbing"
-	@echo "  make run-local-fast  # local, single PDF, stub model, <60s"
-	@echo "  make build-snapshot  # rebuild the DigitalOcean snapshot"
-	@echo "  make test            # run module against test set (user-only)"
-	@echo "  make report          # print latest round_history table"
+	@echo "  make run       # provision H200 droplet, run loop, tear down on exit"
+	@echo "  make down      # destroy a droplet whose ID we recorded (recovery)"
+	@echo "  make snapshot  # walk through snapshot creation"
+	@echo "  make test      # run module against test set (user-only, local)"
+	@echo "  make report    # print latest round_history table"
+	@echo "  make clean     # clear inbox/feedback/cache"
 
-run-remote:
-	bash orchestration/run.sh remote
+run:
+	python orchestration/launch.py up
 
-run-local:
-	@echo "LOCAL MODE: plumbing test only. Output quality is not representative"
-	@echo "of remote H100 runs because Metal/CPU and CUDA produce different model"
-	@echo "outputs. Use this to verify containers come up and data flows, not to"
-	@echo "evaluate translation quality."
-	bash orchestration/run.sh local
+down:
+	python orchestration/launch.py down
 
-run-local-fast:
-	@echo "LOCAL FAST: docker stack with stubbed Ollama (canned responses)."
-	@echo "Verifies wiring, not model quality. Target: <60s."
-	python scripts/run_local_fast.py
-
-build-snapshot:
-	python orchestration/provision.py build-snapshot
+snapshot:
+	python orchestration/launch.py snapshot
 
 test:
 	python scripts/run_test.py

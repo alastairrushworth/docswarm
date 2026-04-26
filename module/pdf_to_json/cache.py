@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -43,5 +45,13 @@ def load(pdf_hash: str, page_index: int, model_tag: str, prompt_version: str) ->
 
 
 def store(pdf_hash: str, page_index: int, model_tag: str, prompt_version: str, value: Any) -> None:
+    """Atomic write: serialize → write to .tmp.<uuid> → os.replace.
+
+    Concurrent writers don't trample each other; killed processes can't leave
+    a torn-but-parseable file in the cache.
+    """
     p = _path_for(_key(pdf_hash, page_index, model_tag, prompt_version))
-    p.write_text(json.dumps(value))
+    tmp = p.with_suffix(p.suffix + f".tmp.{uuid.uuid4().hex}")
+    blob = json.dumps(value)
+    tmp.write_text(blob)
+    os.replace(tmp, p)

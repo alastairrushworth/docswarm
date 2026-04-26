@@ -1,8 +1,0 @@
-services:
-  developer-agent:
-    environment:
-      - DOCSWARM_MODE=local
-
-  judge:
-    environment:
-      - DOCSWARM_MODE=local

@@ -1,72 +1,79 @@
 # docswarm
 
-Translate scanned magazine PDFs into schema-conformant JSON via local Ollama models, driven by an iterative Claude Code agent. See `DESIGN.md` for the full spec; `AGENT.md` for the agent's guardrails.
+Translate scanned magazine PDFs into schema-conformant JSON via local Ollama models, driven by an iterative Claude Code agent. See `DESIGN.md` for the spec; `AGENT.md` for the agent's guardrails.
+
+The whole stack runs on a DigitalOcean H200 droplet. You drive it from your local terminal: `make run` provisions, runs, and tears down.
 
 ## Quick start
 
 ```bash
-# 1) Local sanity test — ~30s, no Ollama, no Docker. Verifies wiring end-to-end.
-make run-local-fast
+# Install doctl locally and authenticate.
+brew install doctl
+doctl auth init
 
-# 2) Local plumbing test — brings up the Docker stack against local Ollama.
-#    Output quality is NOT representative of remote runs (Metal/CPU vs CUDA).
-make run-local
+# One-time: build a snapshot with Docker, NVIDIA toolkit, Ollama and the
+# models pre-pulled. `make snapshot` walks through the steps; paste the
+# resulting ID into config.yaml `digitalocean.snapshot_id`.
+make snapshot
 
-# 3) Real iteration run on a DigitalOcean H100 droplet.
-#    Provisions, runs the loop, tears down on exit (plus on-droplet watchdog).
-make run-remote
+# Run the iteration loop on a fresh droplet. Streams output to your terminal,
+# tears down on exit (success, error, or Ctrl-C).
+make run
 
-# Inspect progress
+# Inspect progress at any time (reads trends/round_history.json).
 make report
 
 # Final user-only step: run the frozen module against the held-out test set.
 make test
 ```
 
-## Test modes
+## What `make run` does
 
-| Target | What it does | Needs Ollama? | Needs GPU? | Needs DO? | Time |
-|---|---|---|---|---|---|
-| `make run-local-fast` | Full Docker stack with **stubbed Ollama** (canned responses), one round on a synthetic PDF | no | no | no | <60s |
-| `make run-local` | Full Docker stack with **real local Ollama** (small models) | yes (small) | no | no | minutes |
-| `make run-remote` | Full iteration loop on H100 droplet | yes (full) | yes | yes | up to `iteration.wall_clock_hours` |
-
-`run-local-fast` is the right thing to run after editing module/judge code — it brings up the real Docker stack (translator container, judge container, agent container, inbox/feedback file protocol, trend file) but swaps the Ollama image for a tiny stub (`docker/stub_ollama.py`) that returns canned JSON. No model weights downloaded.
+1. `git push origin <current-branch>` so the droplet can fetch your latest code.
+2. `doctl compute droplet create` from the snapshot in `config.yaml`.
+3. SSH to the droplet, `git pull`, `docker compose up --build`.
+4. Inside the stack:
+   - `ollama-main` loads the coder + vision models.
+   - `judge` watches `judge/inbox/` for marking + broad requests.
+   - `developer-agent` runs `scripts/run_validation.py`, which:
+     - Round 1: translates val PDFs with the starter pipeline → broad eval → commit.
+     - Round n+1: invokes `claude --print` so Claude Code can edit the translator code based on round n's feedback (using marking probes if useful) → re-runs broad eval → commit.
+5. On exit (plateau, wall-clock, or you hit Ctrl-C locally), `doctl compute droplet delete` runs.
 
 ## Configuration
 
-All tunables live in `config.yaml` — that file is the only place to change models, scoring weights, iteration controls, and infrastructure settings. Hardcoded values in code are forbidden.
+`config.yaml` is the single source of truth. Hardcoded values in code are forbidden.
 
-### Required before first remote run
+### Required before first run
 
 ```yaml
 repo:
-  url: "git@github.com:USER/REPO.git"            # your repo
-  deploy_key_path: "/secrets/deploy_key"         # mount a key file at ./secrets/deploy_key
+  url:             "git@github.com:USER/REPO.git"      # your repo
+  branch:          "agent"
+  deploy_key_path: "/secrets/deploy_key"               # mount a key file at ./secrets/deploy_key
 
 digitalocean:
-  api_token_env: "DO_API_TOKEN"                  # export this env var locally
-  snapshot_id: ""                                # set after `make build-snapshot`
+  region:        "nyc2"                                # adjust to a region with H200 availability
+  size:          "gpu-h200x1-141gb"
+  snapshot_id:   ""                                    # FILL IN after `make snapshot`
+  ssh_key_id:    ""                                    # `doctl compute ssh-key list` → ID
 ```
-
-Plus: `export DO_API_TOKEN=...` in your shell.
 
 ### Knobs you'll touch most
 
 ```yaml
 models:
-  vision_small: "llama3.2-vision:11b"
-  vision_large: "minicpm-v:latest"
-  text_large:   "qwen2.5:32b"
-  judge:        "mistral:7b"            # different family from translators
+  coder:     "qwen3-coder:32b"        # Claude Code + judge LLM
+  vision:    "qwen2.5vl:32b"          # translator (multimodal)
+  judge:     "qwen3-coder:32b"
+  embedding: "nomic-embed-text"
 
 iteration:
-  wall_clock_hours:          12         # hard remote budget
-  page_budget_seconds:       30         # per-page timeout in pdf_to_json
-  plateau_window:            3          # rounds-since-best to trigger early stop
-  plateau_aggregate_floor:   0.30       # plateau detector inactive below this
+  wall_clock_hours: 12
+  page_concurrency: 4                 # parallel page extractions per PDF
+  pdf_concurrency: 3                  # parallel PDFs per round
 
-weights:                                # broad-mode aggregate, must sum to 1.0
+weights:                              # broad-mode aggregate, sums to 1.0
   schema_validity: 0.10
   article_count:   0.10
   metadata:        0.15
@@ -75,10 +82,6 @@ weights:                                # broad-mode aggregate, must sum to 1.0
   order:           0.10
   pages:           0.10
 ```
-
-### Local-mode overrides
-
-The `local:` section in `config.yaml` is applied when `DOCSWARM_MODE=local`. By default it disables large models and shortens the wall-clock budget.
 
 ## Layout
 
@@ -89,28 +92,30 @@ DESIGN.md               # full spec
 
 module/pdf_to_json/     # the deliverable
   schema.py             # pydantic — schema source of truth
-  pipeline.py           # pdf_to_json(pdf_path) entry point
+  pipeline.py           # pdf_to_json(pdf_path) entry point (starter — agent rewrites)
   cache.py              # content-hash-keyed per-page cache
   ollama_client.py      # vision + text + embedding HTTP client
   assemble.py           # IR → schema-conformant Document
+  config.py             # config loader
 
 judge/                  # runs in its own container
-  broad.py              # weighted continuous scoring (Hungarian-aligned)
-  marking.py            # targeted per-article / per-field scoring
-  leakage_filter.py     # n-gram overlap redactor (safety net)
   judge.py              # inbox/feedback file watcher
+  broad.py              # weighted continuous scoring (Hungarian-aligned)
+  marking.py            # freeform LLM-driven targeted Q&A
+  llm_client.py         # judge → ollama-main /api/chat
+  similarity.py         # token + embedding similarity
+  alignment.py          # Hungarian alignment
+  leakage_filter.py     # n-gram overlap redactor (safety net)
+  path_resolver.py      # marking focus.path → truth slice
 
 scripts/
-  run_validation.py     # iteration loop (translate → broad eval → commit → push)
+  run_validation.py     # iteration loop (translate → broad → claude → repeat)
   run_test.py           # user-only: frozen module against test set
-  run_local_fast.py     # stub-mode smoke test
   report.py             # print round_history table
   export_schema.py      # schema.py → schema/schema.json
 
 orchestration/
-  provision.py          # DigitalOcean droplet up/down
-  run.sh                # one-command launcher (local | remote)
-  teardown.sh           # manual droplet teardown
+  launch.py             # doctl-driven up / down / snapshot
 
 data/
   train/{pdfs,truth}/   # readable by the agent (3 hand-curated pairs)
@@ -120,13 +125,6 @@ data/
 trends/round_history.json   # appended each round, committed
 ```
 
-## Where output goes
-
-- Per-round broad-eval feedback: `judge/feedback/{pdf_id}__broad__round{n}__*.json`
-- Trend history: `trends/round_history.json`
-- Test-set predictions (after `make test`): `data/test/predictions/{pdf_id}.json`
-- Audit trail: per-round commits on the `agent` branch
-
 ## Hard rules (non-leakage)
 
-The developer-agent container does not mount `data/val/truth/` or `data/test/`. The judge container is the only place ground truth lives. Hints from the judge pass through a deterministic n-gram overlap filter before being returned. See `AGENT.md` for the full set of rules.
+The developer-agent container does not mount `data/val/truth/` or `data/test/`. The judge container is the only place ground truth lives. Marking feedback passes through a deterministic n-gram overlap filter before being returned. See `AGENT.md` for the full set of rules.

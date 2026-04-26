@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
-import yaml
-
 from . import llm_client
+from .config import get
 from .path_resolver import resolve
 
 logger = logging.getLogger("judge.marking")
@@ -55,13 +53,7 @@ Respond with a single JSON object, no prose outside it:
 
 
 def _load_judge_model() -> str:
-    cfg_path = os.environ.get("DOCSWARM_CONFIG", "/workspace/config.yaml")
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f) or {}
-        return cfg.get("models", {}).get("judge", "qwen2.5:32b")
-    except FileNotFoundError:
-        return "qwen2.5:32b"
+    return str(get("models.judge", "qwen3-coder:32b"))
 
 
 def _shrink(value: Any, cap: int = FOCUS_VALUE_BYTE_CAP) -> tuple[Any, bool]:

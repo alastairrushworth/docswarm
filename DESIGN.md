@@ -6,10 +6,7 @@
 
 Build a system that develops a Python module which translates magazine PDFs (late-19th-century cycling press, scanned, no reliable OCR) into JSON conforming to a fixed schema. Development is driven by Claude Code as an iterative agent, using local Ollama models — with vision models likely doing significant work, given the input format.
 
-Two run targets:
-
-- **Remote**: H100 droplet on DigitalOcean — for real development runs.
-- **Local**: Mac (and probably Windows-via-WSL2) — for plumbing smoke tests.
+**Run target**: a single H200 droplet on DigitalOcean. The user drives the run from their local terminal — `make run` provisions, runs, and tears down. Local-only modes were tried and removed: Metal/CPU vs CUDA divergence made local results misleading, and the `doctl`-driven flow is fast enough that the value of a local plumbing path didn't justify its maintenance cost.
 
 The agent learns from 3 hand-curated `(PDF, JSON)` training pairs and improves against 3 validation pairs graded by a separate judge process. 3 test pairs are reserved for the user's final review. All set sizes are intended to grow over time.
 
@@ -125,21 +122,19 @@ Code globs the data directories; counts are not hardcoded.
 
 ### 5.1 Containers
 
-Three roles, each in its own Docker container. Same compose file works locally and remotely; differences are GPU mounts and model sizes (§9).
+Three services on a single Docker network:
 
-1. **Developer Agent container** — runs Claude Code. Mounts: project repo (rw), `data/train/` (ro), `data/val/pdfs/` (ro), `judge/inbox/` (rw), `judge/feedback/` (ro). **No mount** for `data/val/truth/` or anything under `data/test/`.
-2. **Judge container** — runs `judge.py` plus its own Ollama instance. Mounts: `data/val/truth/` (ro), `judge/inbox/` (ro), `judge/feedback/` (rw). Exposes only a healthcheck.
-3. **Ollama service container(s)** — one or more Ollama servers on a Docker network. Translator and judge use *different* models so their errors are uncorrelated.
+1. **`ollama-main`** — the Ollama server. `OLLAMA_MAX_LOADED_MODELS` is set so two big models stay resident together: `models.coder` (drives Claude Code via Ollama's Anthropic-compatible API; also serves the judge's marking LLM) and `models.vision` (drives the translator). Embedding model loads alongside. All three services hit this one Ollama. Two coexist instead of two separate Ollama containers because the Ollama runtime already multiplexes models cleanly and the H200's 141 GB VRAM is plenty for both.
+2. **`developer-agent`** — runs the iteration harness, which between rounds shells out to `claude --print` so Claude Code can edit the translator code. Mounts: project repo (rw), `data/train/` (ro), `data/val/pdfs/` (ro), `judge/inbox/` (rw), `judge/feedback/` (ro). **No mount** for `data/val/truth/` or anything under `data/test/`.
+3. **`judge`** — runs `judge.judge` watching `judge/inbox/`. Mounts: `data/val/truth/` (ro), `judge/inbox/` (ro), `judge/feedback/` (rw).
 
 ```
-host (local Mac OR remote H100 droplet)
-├── docker-compose.yml             # base
-├── docker-compose.remote.yml      # GPU mounts, full models
-├── docker-compose.local.yml       # no GPU, small models only
-├── ollama-translator
-├── ollama-judge          (different model from translator)
-├── developer-agent       (Claude Code)
-└── judge
+host (local Mac, with doctl)
+└── DigitalOcean H200 droplet
+    ├── docker-compose.yml
+    ├── ollama-main          (qwen3-coder + qwen2.5vl + nomic-embed)
+    ├── developer-agent      (harness + Claude Code)
+    └── judge
 ```
 
 ### 5.2 GitHub repo as state
@@ -170,18 +165,19 @@ digitalocean:
   snapshot_id:     ""                               # FILL IN after first `make build-snapshot`
 
 # ----- Models (Ollama tags) -----
+# Two big models loaded concurrently in ollama-main; embedding alongside.
 # Agent may revise these in early rounds and commit the change.
 models:
-  vision_small: "llama3.2-vision:11b"
-  vision_large: "minicpm-v:latest"
-  text_small:   "llama3.2:3b"
-  text_large:   "qwen2.5:32b"
-  judge:        "mistral:7b"           # different family from translators
+  coder:     "qwen3-coder:32b"     # Claude Code + judge LLM
+  vision:    "qwen2.5vl:32b"       # translator (multimodal)
+  judge:     "qwen3-coder:32b"
+  embedding: "nomic-embed-text"
 
 # ----- Iteration control -----
 iteration:
   wall_clock_hours:           12
-  page_budget_seconds:        30
+  page_concurrency:           4        # parallel pages per PDF
+  pdf_concurrency:            3        # parallel PDFs per round
   epsilon:                    0.005    # min Δaggregate to count as improvement
   min_rounds_before_plateau:  3        # plateau detector inactive before this
   plateau_aggregate_floor:    0.30     # plateau detector inactive while aggregate < floor
@@ -199,16 +195,16 @@ weights:
 
 # ----- Judge: non-leakage policy -----
 leakage:
-  allow_structural_hints:        true   # "missing article on page 3" allowed
-  hint_overlap_filter_threshold: 0.30   # substring-overlap threshold for redaction
+  allow_structural_hints:        true
+  hint_overlap_filter_threshold: 0.30
 
-# ----- Local mode overrides -----
-local:
-  models:
-    vision_large: null                  # disabled on local; vision_small only
-    text_large:   null
-  iteration:
-    wall_clock_hours: 1                 # local is for plumbing, not real iteration
+# ----- Single Ollama, two big models loaded -----
+ollama:
+  url:                "http://ollama-main:11434"
+  num_parallel:       4
+  max_loaded_models:  3
+  keep_alive:         "24h"
+  context_length:     65536
 ```
 
 The agent reads from `config.yaml` at startup. Hardcoded values in code are forbidden.
@@ -230,10 +226,9 @@ def pdf_to_json(pdf_path: str) -> dict: ...
 
 Internals are the agent's design space. What the spec *does* fix:
 
-- **Available models**: from `config.yaml`. Agent picks per call.
-- **Per-page time budget**: from `config.yaml`. Enforced by timeout. On exhaustion, return whatever partial output is available for that page and emit a warning. The module always returns *some* JSON conforming (best effort) to the schema.
-- **VRAM**: agent should query `nvidia-smi` at startup, log the available VRAM, and choose a model loadout that fits — ideally translator-large + judge co-resident on the H100 (typically 80GB) so neither has to hot-swap. If memory is tight, prefer keeping the judge resident and swapping translator-large in when needed. Agent records its chosen loadout at startup so the user can see what it picked.
-- **Caching**: vision passes are expensive. The agent is encouraged to cache per-page intermediate representations across iteration rounds, **keyed by content hash of the PDF** (not filename, to avoid cache poisoning if a PDF is replaced). Implementation left to the agent.
+- **Available models**: from `config.yaml`. Agent picks per call. Both `models.coder` and `models.vision` stay resident in `ollama-main` (max-loaded-models setting) so neither has to hot-swap.
+- **Resilience**: the module always returns *some* JSON conforming (best effort) to the schema. On per-call timeout or extraction failure, fill what you can and continue. Never raise.
+- **Caching**: vision passes are expensive. The agent is encouraged to cache per-page intermediate representations across iteration rounds, **keyed by content hash of the PDF** (not filename, to avoid cache poisoning if a PDF is replaced). Cache writes are atomic (tmp + rename) so concurrent writers and killed processes can't corrupt entries.
 
 ## 8. Iteration loop
 
@@ -444,49 +439,30 @@ Marking mode:
 }
 ```
 
-## 10. Orchestration: local and remote
+## 10. Orchestration
 
-### 10.1 Common command interface
+### 10.1 Command interface
 
 ```
-make run-remote      # provision H100, run loop, tear down
-make run-local       # local docker-compose, smoke-test plumbing
-make run-local-fast  # local, single PDF, stub model, <60s end-to-end
-make build-snapshot  # rebuild the DO snapshot when models change
-make test            # run final module against test set (user-only)
-make report          # print latest round_history table
+make run       # provision H200 droplet, run loop, tear down on exit
+make down      # destroy a droplet whose ID we recorded (recovery)
+make snapshot  # walk through snapshot creation
+make test      # run frozen module against held-out test set (user-only, local)
+make report    # print latest round_history table
 ```
 
-`run-remote` and `run-local` invoke the same agent loop; differences are compose overlay and config.
+### 10.2 What `make run` does
 
-### 10.2 Remote mode (H100)
+`orchestration/launch.py up` drives `doctl` from your local terminal:
 
-`make run-remote`:
+1. **Push**: `git push origin <current-branch>` so the droplet can fetch your latest code.
+2. **Provision**: `doctl compute droplet create` from the snapshot in `config.yaml` (Docker, NVIDIA Container Toolkit, Ollama, pre-pulled model weights). Waits until the droplet has a public IP.
+3. **Bring up**: `ssh root@<ip>` runs `cd /workspace && git pull && docker compose up --build --abort-on-container-exit developer-agent`.
+4. **Stream**: `ssh -t` ties the agent container's stdout to your local terminal.
+5. **Capture artifacts**: the agent's per-round commits/pushes are the artifacts — pull when you want to inspect.
+6. **Auto-shutdown**: a SIGINT/SIGTERM/EXIT trap in the local launcher calls `doctl compute droplet delete` on exit (success, error, or Ctrl-C). The agent loop also exits naturally on plateau or wall-clock; `--abort-on-container-exit developer-agent` brings the whole stack down with it.
 
-1. **Provision**: DigitalOcean API creates an H100 droplet from the snapshot identified in `config.yaml` (Docker, NVIDIA drivers, Ollama, pre-pulled model weights).
-2. **Sync**: agent's repo is cloned via deploy key directly on the droplet; the local script pushes its current branch first.
-3. **Bring up**: `ssh` runs `docker compose -f docker-compose.yml -f docker-compose.remote.yml up --build`.
-4. **Stream logs**: `ssh -t` tails the agent container's stdout to the local terminal. Persisted on the droplet too.
-5. **Capture artifacts**: agent's commits/pushes are the artifacts; user pulls when run ends.
-6. **Auto-shutdown**: a `trap` in the local script destroys the droplet on exit (success/error/`Ctrl-C`). **Plus** a watchdog cron on the droplet self-destructs after `iteration.wall_clock_hours` regardless of what the local script does. Belt-and-braces — a network blip on the laptop should not cost real money.
-
-Cost printed at run start: estimated cap and hard kill timestamp.
-
-### 10.3 Local mode (Mac, optional Windows via WSL2)
-
-`make run-local`:
-
-1. No provisioning. Docker Desktop on Mac (Apple Silicon: Metal; Intel: CPU only).
-2. Same containers, same compose, but `docker-compose.local.yml` overlay: removes GPU mounts, applies the `local:` overrides from `config.yaml` (small models only, short wall-clock).
-3. Repo is the local checkout (mounted directly, no push/pull).
-4. Logs to local terminal directly.
-5. **Caveat printed at run start**: "LOCAL MODE: plumbing test only. Output quality is not representative of remote H100 runs because Metal/CPU and CUDA produce different model outputs. Use this to verify containers come up and data flows, not to evaluate translation quality."
-
-`make run-local-fast`: single tiny synthetic PDF, stubbed Ollama (returns canned JSON), one round. Completes in under a minute. CI-style sanity check.
-
-### 10.4 Local mode is for plumbing only
-
-The temptation to iterate locally to save money is real. Resist it. Vision models on Metal/CPU will be far slower and produce different outputs than CUDA on H100. If local broad mode says 0.4 and remote says 0.6, that's not evidence of anything. Use local for "containers came up, deploy key worked, judge container responded." That's it.
+Recovery: if the local launcher crashes mid-run, `make down` reads the recorded droplet ID and destroys it. If that file is also gone, list with `doctl compute droplet list --tag-name docswarm`.
 
 ## 11. Suggested directory structure
 
@@ -494,12 +470,8 @@ The temptation to iterate locally to save money is real. Resist it. Vision model
 project/
 ├── Makefile
 ├── docker-compose.yml
-├── docker-compose.remote.yml
-├── docker-compose.local.yml
 ├── orchestration/
-│   ├── provision.py            # DO droplet up/down
-│   ├── run.sh
-│   └── teardown.sh
+│   └── launch.py               # doctl-driven up / down / snapshot
 ├── data/
 │   ├── train/{pdfs,truth}/
 │   ├── val/{pdfs,truth}/
@@ -542,7 +514,7 @@ C. **Vision model outputs are not deterministic across model/backend versions.**
 
 D. **Cache invalidation is the agent's problem.** Cache keys must be content hashes of the PDF, not filenames. A filename-keyed cache will silently return stale output if a PDF is replaced.
 
-E. **12h × ~$4/h ≈ $50 per full run.** Each spec/agent-prompt iteration costs real money. Use `run-local` aggressively for plumbing. Reserve remote for runs where the plumbing is known-good.
+E. **12h × H200 hourly rate is real money per full run.** Each spec/agent-prompt iteration costs. Iterate on harness changes locally (unit tests, small dry runs) before kicking off `make run`.
 
 F. **Catastrophic first-round failures are protected.** The plateau detector requires both `min_rounds_before_plateau` AND `plateau_aggregate_floor` to activate. Stuck at 0.05 for many rounds → still iterating, not stopped. If this turns out to be the wrong default, lower the floor in `config.yaml`.
 

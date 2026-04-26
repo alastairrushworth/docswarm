@@ -5,26 +5,26 @@ repo:
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  api_token_env:   "DO_API_TOKEN"                   # name of env var holding the token
-  region:          "nyc2"
-  size:            "gpu-h200x1-141gb"
-  snapshot_id:     ""                               # FILL IN after first `make build-snapshot`
+  region:        "nyc2"
+  size:          "gpu-h200x1-141gb"
+  snapshot_id:   ""                                 # FILL IN after first `make build-snapshot`
+  ssh_key_id:    ""                                 # `doctl compute ssh-key list` → ID
+  droplet_name:  "docswarm-h200"
 
 # ----- Models (Ollama tags) -----
-# Same big multimodal model serves the developer agent (Claude Code via Ollama's
-# Anthropic-compatible API), the translator's vision/text passes, and the
-# judge's freeform marking. Different prompts, same model. Embedding is small
-# and stays loaded alongside.
+# Two Ollama models loaded concurrently in a single Ollama server:
+#  - coder: drives Claude Code (developer agent) and the judge LLM (marking)
+#  - vision: multimodal, drives the translator's per-page extraction
+# Embedding stays loaded alongside.
 models:
-  coder:        "qwen3-coder:32b"        # also used as translator + judge LLM
-  translator:   "qwen3-coder:32b"
-  judge:        "qwen3-coder:32b"
-  embedding:    "nomic-embed-text"
+  coder:     "qwen3-coder:32b"
+  vision:    "qwen2.5vl:32b"
+  judge:     "qwen3-coder:32b"        # same family as coder; different prompt
+  embedding: "nomic-embed-text"
 
 # ----- Iteration control -----
 iteration:
   wall_clock_hours:           12
-  page_budget_seconds:        30
   page_concurrency:           4          # parallel page extractions per PDF
   pdf_concurrency:            3          # parallel PDFs in a broad round
   epsilon:                    0.005
@@ -47,12 +47,13 @@ leakage:
   allow_structural_hints:        true
   hint_overlap_filter_threshold: 0.30
 
-# ----- Single Ollama instance, shared by translator + agent + judge -----
+# ----- Single Ollama instance, two models loaded, shared by translator + agent + judge -----
 ollama:
-  url:           "http://ollama-main:11434"
-  num_parallel:  8                         # OLLAMA_NUM_PARALLEL on the server
-  keep_alive:    "24h"                     # default model keep-alive
-  context_length: 65536                    # Claude Code requires ≥64k
+  url:                "http://ollama-main:11434"
+  num_parallel:       4                  # OLLAMA_NUM_PARALLEL on the server
+  max_loaded_models:  3                  # coder + vision + embedding
+  keep_alive:         "24h"
+  context_length:     65536              # Claude Code requires ≥64k
 
 # ----- Paths (inside containers) -----
 paths:
@@ -65,14 +66,3 @@ paths:
   feedback_dir:     "/workspace/judge/feedback"
   trends_file:      "/workspace/trends/round_history.json"
   cache_dir:        "/workspace/.cache/pdf_to_json"
-
-# ----- Local mode overrides -----
-local:
-  models:
-    coder:      "qwen3-coder:7b"
-    translator: "qwen3-coder:7b"
-    judge:      "qwen3-coder:7b"
-  iteration:
-    wall_clock_hours: 1
-    page_concurrency: 2
-    pdf_concurrency: 1

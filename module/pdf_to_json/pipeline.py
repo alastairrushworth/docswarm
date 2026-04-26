@@ -8,7 +8,6 @@ call per page is unlikely to be sufficient.
 The fixed contract is:
 - the public function name and signature: `pdf_to_json(pdf_path: str) -> dict`
 - the schema source-of-truth in `schema.py`
-- the per-page time budget from `config.iteration.page_budget_seconds`
 - content-hash cache keying
 
 Everything else here — prompts, model routing, page rendering, stitching — is
@@ -95,7 +94,7 @@ def _extract_page(
     page_index: int,
     image_path: Path,
     model: str,
-    budget_seconds: int,
+    timeout_seconds: float,
 ) -> dict[str, Any]:
     cached = cache.load(pdf_hash, page_index, model, PROMPT_VERSION)
     if cached is not None:
@@ -106,7 +105,7 @@ def _extract_page(
             model=model,
             prompt=_VISION_PROMPT,
             images=[image_path],
-            timeout=float(budget_seconds),
+            timeout=timeout_seconds,
         )
     except Exception as e:
         warnings.warn(f"page {page_index + 1}: vision call failed: {e}")
@@ -148,11 +147,13 @@ def _merge_articles(per_page: list[tuple[int, dict[str, Any]]]) -> list[dict[str
 def pdf_to_json(pdf_path: str) -> dict:
     """Translate a scanned magazine PDF to schema-conformant JSON.
 
-    Always returns *some* JSON — best effort on timeout or extraction failure.
+    Always returns *some* JSON — best effort on extraction failure.
     """
-    page_budget = int(get("iteration.page_budget_seconds", 30))
+    per_call_timeout = float(get("iteration.per_call_timeout_seconds", 120))
     page_concurrency = max(1, int(get("iteration.page_concurrency", 4)))
-    model = get("models.translator", "qwen3-coder:32b")
+    model = get("models.vision")
+    if not model:
+        raise RuntimeError("config.models.vision is required")
 
     p = Path(pdf_path)
     if not p.is_file():
@@ -184,7 +185,7 @@ def pdf_to_json(pdf_path: str) -> dict:
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=page_concurrency) as ex:
             futs = {
-                ex.submit(_extract_page, pdf_hash, i, img, model, page_budget): i
+                ex.submit(_extract_page, pdf_hash, i, img, model, per_call_timeout): i
                 for i, img in rendered.items()
             }
             for fut in as_completed(futs):

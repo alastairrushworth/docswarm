@@ -6,9 +6,17 @@ services:
     volumes:
       - ollama-main-data:/root/.ollama
     environment:
-      - OLLAMA_NUM_PARALLEL=8
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
       - OLLAMA_KEEP_ALIVE=24h
       - OLLAMA_CONTEXT_LENGTH=65536
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -26,7 +34,6 @@ services:
         condition: service_healthy
     environment:
       - DOCSWARM_CONFIG=/workspace/config.yaml
-      - OLLAMA_JUDGE_URL=http://ollama-main:11434
     volumes:
       - ./config.yaml:/workspace/config.yaml:ro
       - ./judge:/workspace/judge
@@ -47,9 +54,8 @@ services:
         condition: service_started
     environment:
       - DOCSWARM_CONFIG=/workspace/config.yaml
-      # Translator/judge HTTP clients use these; both point at the single Ollama.
+      # Translator HTTP client.
       - OLLAMA_URL=http://ollama-main:11434
-      - OLLAMA_JUDGE_URL=http://ollama-main:11434
       # Claude Code → local Ollama via Anthropic-compatible API.
       - ANTHROPIC_BASE_URL=http://ollama-main:11434
       - ANTHROPIC_AUTH_TOKEN=ollama
@@ -72,6 +78,7 @@ services:
       - ./.git:/workspace/.git
       - ./secrets:/secrets:ro
     working_dir: /workspace
+    command: ["python", "scripts/run_validation.py"]
 
 networks:
   docswarm:

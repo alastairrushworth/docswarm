@@ -1,6 +1,7 @@
-"""Config loader. Hardcoded constants in code are forbidden — read from here."""
+"""Config loader for the judge package — same lookup contract as the module's loader."""
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Any
@@ -8,32 +9,31 @@ from typing import Any
 import yaml
 
 
-def _config_path() -> Path:
+def _config_path() -> Path | None:
     env = os.environ.get("DOCSWARM_CONFIG")
     if env:
-        return Path(env)
+        p = Path(env)
+        return p if p.is_file() else None
     here = Path(__file__).resolve()
     for parent in [here, *here.parents]:
         candidate = parent / "config.yaml"
         if candidate.is_file():
             return candidate
-    raise FileNotFoundError("config.yaml not found; set DOCSWARM_CONFIG to override.")
+    workspace = Path("/workspace/config.yaml")
+    return workspace if workspace.is_file() else None
 
 
-_cache: dict[str, Any] | None = None
-
-
-def load_config() -> dict[str, Any]:
-    global _cache
-    if _cache is None:
-        with _config_path().open() as f:
-            _cache = yaml.safe_load(f) or {}
-    return _cache
+@functools.lru_cache(maxsize=1)
+def load() -> dict[str, Any]:
+    p = _config_path()
+    if p is None:
+        return {}
+    with p.open() as f:
+        return yaml.safe_load(f) or {}
 
 
 def get(path: str, default: Any = None) -> Any:
-    """Dotted-path getter, e.g. get('iteration.page_budget_seconds')."""
-    cur: Any = load_config()
+    cur: Any = load()
     for part in path.split("."):
         if not isinstance(cur, dict) or part not in cur:
             return default
