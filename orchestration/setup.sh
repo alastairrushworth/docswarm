@@ -7,10 +7,17 @@ set -euo pipefail
 
 log() { echo ">>> $*"; }
 
-# 1. Docker
+# 1. Docker (engine + buildx + compose plugin).
+# Some DO base images (e.g. gpu-h100x1-base) ship docker-ce alone, so we
+# explicitly install the compose plugin whether or not docker is present.
 if ! command -v docker >/dev/null 2>&1; then
     log "installing docker"
     curl -fsSL https://get.docker.com | sh
+fi
+if ! docker compose version >/dev/null 2>&1; then
+    log "installing docker compose plugin"
+    apt-get update
+    apt-get install -y docker-compose-plugin
 fi
 
 # 2. NVIDIA Container Toolkit
