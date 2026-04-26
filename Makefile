@@ -1,5 +1,7 @@
 .PHONY: run down snapshot test report clean help
 
+PYTHON ?= $(shell command -v python3 || command -v python)
+
 help:
 	@echo "Targets:"
 	@echo "  make run       # provision H200 droplet, run loop, tear down on exit"
@@ -10,19 +12,19 @@ help:
 	@echo "  make clean     # clear inbox/feedback/cache"
 
 run:
-	python orchestration/launch.py up
+	$(PYTHON) orchestration/launch.py up
 
 down:
-	python orchestration/launch.py down
+	$(PYTHON) orchestration/launch.py down
 
 snapshot:
-	python orchestration/launch.py snapshot
+	$(PYTHON) orchestration/launch.py snapshot
 
 test:
-	python scripts/run_test.py
+	$(PYTHON) scripts/run_test.py
 
 report:
-	python scripts/report.py
+	$(PYTHON) scripts/report.py
 
 clean:
 	rm -rf judge/inbox/*.json judge/feedback/*.json

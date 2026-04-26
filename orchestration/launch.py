@@ -47,9 +47,13 @@ def _require_doctl() -> None:
 
 def _doctl(*args: str, capture: bool = False) -> str:
     if capture:
-        r = subprocess.run(["doctl", *args], check=True, capture_output=True, text=True)
+        r = subprocess.run(["doctl", *args], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"doctl {' '.join(args)} failed:\n{r.stderr.strip() or r.stdout.strip()}")
         return r.stdout.strip()
-    subprocess.run(["doctl", *args], check=True)
+    r = subprocess.run(["doctl", *args])
+    if r.returncode != 0:
+        sys.exit(f"doctl {' '.join(args)} exited {r.returncode}")
     return ""
 
 
@@ -129,6 +133,47 @@ def _ssh_run(ip: str, cmd: str) -> int:
     return subprocess.run(full, cwd=ROOT).returncode
 
 
+def _wait_for_ssh(ip: str, timeout: float = 300.0) -> None:
+    """Poll until sshd is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+             "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+             f"root@{ip}", "true"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return
+        time.sleep(5)
+    sys.exit(f"sshd at {ip} never came up within {timeout:.0f}s")
+
+
+def _scp(local: Path, ip: str, remote: str) -> None:
+    subprocess.run(
+        ["scp", "-o", "StrictHostKeyChecking=accept-new",
+         str(local), f"root@{ip}:{remote}"],
+        check=True,
+    )
+
+
+def _patch_snapshot_id(snapshot_id: str) -> None:
+    """In-place edit of config.yaml's digitalocean.snapshot_id, preserving
+    formatting and comments."""
+    cfg_path = ROOT / "config.yaml"
+    text = cfg_path.read_text()
+    import re
+    new_text, n = re.subn(
+        r'(snapshot_id:\s*)"[^"]*"',
+        f'\\1"{snapshot_id}"',
+        text,
+        count=1,
+    )
+    if n != 1:
+        sys.exit("could not locate snapshot_id line in config.yaml")
+    cfg_path.write_text(new_text)
+
+
 def _destroy(droplet_id: str | None) -> None:
     if not droplet_id:
         return
@@ -182,13 +227,113 @@ def down() -> int:
 
 
 def snapshot() -> int:
-    print(">>> Snapshot is currently a manual workflow:")
-    print("    1. `doctl compute droplet create` an H200 with the base Ubuntu image.")
-    print("    2. SSH in. Install: docker, NVIDIA Container Toolkit, ollama.")
-    print("    3. Pre-pull every model in config.yaml `models:` (coder, vision, embedding).")
-    print("    4. Clone this repo to /workspace.")
-    print("    5. `doctl compute droplet-action snapshot --snapshot-name docswarm-base <id>`.")
-    print("    6. Paste the snapshot ID into config.yaml `digitalocean.snapshot_id`.")
+    """Automated one-shot snapshot build:
+
+      1. Spin up a setup droplet (cheap GPU SKU, GPU base image).
+      2. SCP deploy key + setup.sh.
+      3. Run setup.sh: install Docker / NVIDIA toolkit / Ollama, pull models,
+         clone the repo to /workspace.
+      4. Shut the droplet down (cleaner snapshots).
+      5. doctl droplet-action snapshot --wait.
+      6. Patch config.yaml with the new snapshot ID.
+      7. Destroy the setup droplet.
+    """
+    _require_doctl()
+    cfg = _cfg()
+    do = cfg["digitalocean"]
+    repo = cfg["repo"]
+
+    ssh_key_id = do.get("ssh_key_id", "")
+    if not ssh_key_id:
+        sys.exit("config.digitalocean.ssh_key_id is empty; `doctl compute ssh-key list`")
+
+    deploy_key = ROOT / "secrets/deploy_key"
+    if not deploy_key.is_file():
+        sys.exit(f"deploy key not found at {deploy_key} — see README")
+
+    setup_script = ROOT / "orchestration/setup.sh"
+    if not setup_script.is_file():
+        sys.exit(f"setup script missing at {setup_script}")
+
+    size = do.get("snapshot_size") or do["size"]
+    image = do.get("snapshot_image", "gpu-h100x1-base")
+    name = f"docswarm-snapshot-{int(time.time())}"
+    models = [v for v in cfg.get("models", {}).values() if v]
+
+    print(f">>> creating setup droplet {name} ({size}, image={image})")
+    out = _doctl(
+        "compute", "droplet", "create", name,
+        "--region", do["region"],
+        "--size", size,
+        "--image", image,
+        "--ssh-keys", str(ssh_key_id),
+        "--tag-names", "docswarm-setup",
+        "--wait",
+        "--output", "json",
+        capture=True,
+    )
+    droplets = json.loads(out)
+    droplet = droplets[0] if isinstance(droplets, list) else droplets
+    droplet_id = str(droplet["id"])
+
+    ip = ""
+    for n in droplet.get("networks", {}).get("v4", []):
+        if n.get("type") == "public":
+            ip = n.get("ip_address", "")
+            break
+    if not ip:
+        ip = _wait_for_ip(droplet_id)
+    print(f">>> setup droplet {droplet_id} at {ip}; waiting for sshd")
+    _wait_for_ssh(ip)
+
+    snapshot_id_out: str | None = None
+    try:
+        print(">>> copying deploy key + setup.sh")
+        _ssh_run(ip, "mkdir -p /root/.ssh && chmod 700 /root/.ssh")
+        _scp(deploy_key, ip, "/root/.ssh/id_ed25519")
+        _scp(setup_script, ip, "/root/setup.sh")
+
+        env_prefix = (
+            f'REPO_URL={subprocess.list2cmdline([repo["url"]])} '
+            f'REPO_BRANCH={subprocess.list2cmdline([repo["branch"]])}'
+        )
+        models_args = " ".join(subprocess.list2cmdline([m]) for m in models)
+        cmd = f"chmod +x /root/setup.sh && {env_prefix} /root/setup.sh {models_args}"
+        print(">>> running setup.sh on droplet (this takes 30–60 min for first model pulls)")
+        rc = _ssh_run(ip, cmd)
+        if rc != 0:
+            sys.exit(f"setup script failed (rc={rc}); destroying droplet")
+
+        print(">>> shutting down droplet for clean snapshot")
+        subprocess.run(
+            ["doctl", "compute", "droplet-action", "shutdown", droplet_id, "--wait"],
+            check=False,
+        )
+
+        snap_name = f"docswarm-base-{int(time.time())}"
+        print(f">>> creating snapshot {snap_name} (5–15 min)")
+        _doctl("compute", "droplet-action", "snapshot", droplet_id,
+               "--snapshot-name", snap_name, "--wait")
+
+        out = _doctl("compute", "snapshot", "list", "--resource", "droplet",
+                     "--output", "json", capture=True)
+        snapshots = json.loads(out)
+        ours = [s for s in snapshots if s.get("name") == snap_name]
+        if not ours:
+            sys.exit(f"snapshot {snap_name} not found in `doctl compute snapshot list`")
+        snapshot_id_out = str(ours[0]["id"])
+        _patch_snapshot_id(snapshot_id_out)
+        print(f">>> snapshot {snapshot_id_out} written to config.yaml")
+    finally:
+        print(f">>> destroying setup droplet {droplet_id}")
+        subprocess.run(
+            ["doctl", "compute", "droplet", "delete", droplet_id, "-f"],
+            check=False,
+        )
+
+    if snapshot_id_out is None:
+        return 1
+    print(">>> done. you can now `make run`.")
     return 0
 
 

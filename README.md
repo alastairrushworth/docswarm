@@ -12,8 +12,9 @@ brew install doctl
 doctl auth init
 
 # One-time: build a snapshot with Docker, NVIDIA toolkit, Ollama and the
-# models pre-pulled. `make snapshot` walks through the steps; paste the
-# resulting ID into config.yaml `digitalocean.snapshot_id`.
+# models pre-pulled. Provisions a small GPU droplet, runs orchestration/setup.sh,
+# snapshots, writes the new ID back to config.yaml, destroys the droplet.
+# Takes ~30–60 min on first run; costs ~$2–4 in droplet time.
 make snapshot
 
 # Run the iteration loop on a fresh droplet. Streams output to your terminal,
