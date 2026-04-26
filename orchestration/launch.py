@@ -208,13 +208,21 @@ def up() -> int:
     _wait_for_ssh(ip)
 
     try:
+        # APT_OPTS makes apt-get wait up to 5 min for the lock — needed because
+        # cloud-init may still be running its own apt commands on a fresh boot.
+        apt_opts = "-o DPkg::Lock::Timeout=300"
         remote_cmd = (
             f"set -e; cd /workspace && "
             f"git fetch origin && git checkout {branch} && git pull --ff-only && "
             # Heal snapshots that were built before setup.sh installed the
             # compose plugin. Idempotent and cheap (~1s) when already present.
-            f"docker compose version >/dev/null 2>&1 || "
-            f"  (apt-get update && apt-get install -y docker-compose-plugin) && "
+            f"(docker compose version >/dev/null 2>&1 || "
+            f"  (apt-get {apt_opts} update && apt-get {apt_opts} install -y docker-compose-plugin)) && "
+            # Heal snapshots built before setup.sh staged the deploy key
+            # for the agent container. No-op when already present.
+            f"(test -f /workspace/secrets/deploy_key || "
+            f"  (mkdir -p /workspace/secrets && cp /root/.ssh/id_ed25519 /workspace/secrets/deploy_key && "
+            f"   chmod 600 /workspace/secrets/deploy_key)) && "
             f"docker compose up --build --exit-code-from developer-agent"
         )
         rc = _ssh_run(ip, remote_cmd)

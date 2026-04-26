@@ -7,6 +7,10 @@ set -euo pipefail
 
 log() { echo ">>> $*"; }
 
+# apt on a freshly-booted DO droplet may collide with cloud-init's own apt
+# runs. Wait up to 5 min for the dpkg/apt lock before failing.
+APT="apt-get -o DPkg::Lock::Timeout=300"
+
 # 1. Docker (engine + buildx + compose plugin).
 # Some DO base images (e.g. gpu-h100x1-base) ship docker-ce alone, so we
 # explicitly install the compose plugin whether or not docker is present.
@@ -16,8 +20,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 if ! docker compose version >/dev/null 2>&1; then
     log "installing docker compose plugin"
-    apt-get update
-    apt-get install -y docker-compose-plugin
+    $APT update
+    $APT install -y docker-compose-plugin
 fi
 
 # 2. NVIDIA Container Toolkit
@@ -28,8 +32,8 @@ if ! dpkg -l 2>/dev/null | grep -q nvidia-container-toolkit; then
     curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
         | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
         > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    apt-get update
-    apt-get install -y nvidia-container-toolkit
+    $APT update
+    $APT install -y nvidia-container-toolkit
     nvidia-ctk runtime configure --runtime=docker
     systemctl restart docker
 fi
@@ -80,5 +84,14 @@ else
     git -C /workspace checkout "$REPO_BRANCH"
     git -C /workspace pull --ff-only
 fi
+
+# 8. Stage deploy key for the developer-agent container.
+# `secrets/` is gitignored, so the cloned /workspace has no secrets/ dir.
+# docker-compose mounts ./secrets:/secrets:ro — without this step, the agent
+# container has no key and `git push` from inside silently fails.
+log "staging deploy key at /workspace/secrets/deploy_key"
+mkdir -p /workspace/secrets
+cp /root/.ssh/id_ed25519 /workspace/secrets/deploy_key
+chmod 600 /workspace/secrets/deploy_key
 
 log "setup complete"
