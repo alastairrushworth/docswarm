@@ -5,9 +5,9 @@ repo:
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  region:         "nyc2"
+  region:         "atl1"          # H200 SKU rotates between nyc2/atl1; check availability if create fails
   size:           "gpu-h200x1-141gb"          # the iteration-loop droplet
-  snapshot_id:    ""                          # auto-filled by `make snapshot`
+  snapshot_id:    "226210880"                          # auto-filled by `make snapshot`
   ssh_key_id:     "55897353"                          # `doctl compute ssh-key list` → ID
   droplet_name:   "docswarm-h200"
   # ----- Snapshot setup (`make snapshot`) -----
