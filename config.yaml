@@ -5,7 +5,11 @@ repo:
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  region:         "atl1"          # H200 SKU rotates between nyc2/atl1; check availability if create fails
+  # Region is tried in order — H200 inventory rotates between atl1/nyc2.
+  # Add more regions here if DO opens H200 in others.
+  region:
+    - "atl1"
+    - "nyc2"
   size:           "gpu-h200x1-141gb"          # the iteration-loop droplet
   snapshot_id:    "226210880"                          # auto-filled by `make snapshot`
   ssh_key_id:     "55897353"                          # `doctl compute ssh-key list` → ID

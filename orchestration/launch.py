@@ -57,6 +57,66 @@ def _doctl(*args: str, capture: bool = False) -> str:
     return ""
 
 
+def _doctl_try(*args: str) -> tuple[int, str, str]:
+    """Like _doctl(capture=True) but returns (rc, stdout, stderr) instead of
+    sys.exit'ing on failure. Caller decides how to recover."""
+    r = subprocess.run(["doctl", *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
+def _regions(do: dict) -> list[str]:
+    """Resolve the ordered list of regions to try when creating a droplet.
+
+    `digitalocean.region` may be a string or a list. If a string, also pull
+    in `digitalocean.region_fallbacks` (list, optional) appended after it.
+    """
+    primary = do.get("region")
+    if isinstance(primary, list):
+        return [str(x) for x in primary if x]
+    fallbacks = do.get("region_fallbacks") or []
+    out = [str(primary)] if primary else []
+    out.extend(str(x) for x in fallbacks if x)
+    return out
+
+
+def _create_droplet_with_fallback(
+    *,
+    name: str,
+    size: str,
+    image: str,
+    ssh_key_id: str,
+    regions: list[str],
+    tag: str,
+) -> dict:
+    """Try `doctl droplet create` across regions until one succeeds.
+
+    Falls through to the next region only on the specific 422 error
+    "Size is not available in this region." Any other doctl failure is fatal.
+    Returns the parsed droplet JSON object.
+    """
+    for i, region in enumerate(regions):
+        print(f">>> creating droplet {name} ({size}, region={region}) [{i+1}/{len(regions)}]")
+        rc, stdout, stderr = _doctl_try(
+            "compute", "droplet", "create", name,
+            "--region", region,
+            "--size", size,
+            "--image", image,
+            "--ssh-keys", ssh_key_id,
+            "--tag-names", tag,
+            "--wait",
+            "--output", "json",
+        )
+        if rc == 0:
+            droplets = json.loads(stdout)
+            return droplets[0] if isinstance(droplets, list) else droplets
+        msg = (stderr or stdout).lower()
+        if "not available in this region" in msg and i < len(regions) - 1:
+            print(f"    {region}: size unavailable; trying next region")
+            continue
+        sys.exit(f"droplet create failed:\n{stderr or stdout}")
+    sys.exit(f"size {size} not available in any of {regions}")
+
+
 def _git_branch() -> str:
     r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ROOT,
                        check=True, capture_output=True, text=True)
@@ -72,21 +132,18 @@ def _create_droplet(cfg: dict) -> tuple[str, str]:
     if not ssh_key_id:
         sys.exit("config.digitalocean.ssh_key_id is empty; `doctl compute ssh-key list`")
     name = do.get("droplet_name", "docswarm-h200")
+    regions = _regions(do)
+    if not regions:
+        sys.exit("config.digitalocean.region is empty")
 
-    print(f">>> creating droplet {name} ({do['size']}, region={do['region']})")
-    out = _doctl(
-        "compute", "droplet", "create", name,
-        "--region", do["region"],
-        "--size", do["size"],
-        "--image", str(snapshot),
-        "--ssh-keys", str(ssh_key_id),
-        "--tag-names", "docswarm",
-        "--wait",
-        "--output", "json",
-        capture=True,
+    droplet = _create_droplet_with_fallback(
+        name=name,
+        size=do["size"],
+        image=str(snapshot),
+        ssh_key_id=str(ssh_key_id),
+        regions=regions,
+        tag="docswarm",
     )
-    droplets = json.loads(out)
-    droplet = droplets[0] if isinstance(droplets, list) else droplets
     droplet_id = str(droplet["id"])
     DROPLET_FILE.write_text(droplet_id)
 
@@ -277,21 +334,18 @@ def snapshot() -> int:
     image = do.get("snapshot_image", "gpu-h100x1-base")
     name = f"docswarm-snapshot-{int(time.time())}"
     models = [v for v in cfg.get("models", {}).values() if v]
+    regions = _regions(do)
+    if not regions:
+        sys.exit("config.digitalocean.region is empty")
 
-    print(f">>> creating setup droplet {name} ({size}, image={image})")
-    out = _doctl(
-        "compute", "droplet", "create", name,
-        "--region", do["region"],
-        "--size", size,
-        "--image", image,
-        "--ssh-keys", str(ssh_key_id),
-        "--tag-names", "docswarm-setup",
-        "--wait",
-        "--output", "json",
-        capture=True,
+    droplet = _create_droplet_with_fallback(
+        name=name,
+        size=size,
+        image=image,
+        ssh_key_id=str(ssh_key_id),
+        regions=regions,
+        tag="docswarm-setup",
     )
-    droplets = json.loads(out)
-    droplet = droplets[0] if isinstance(droplets, list) else droplets
     droplet_id = str(droplet["id"])
 
     ip = ""
