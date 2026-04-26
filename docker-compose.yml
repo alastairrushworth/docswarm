@@ -1,0 +1,84 @@
+services:
+  ollama-translator:
+    image: ollama/ollama:latest
+    container_name: ollama-translator
+    networks: [docswarm]
+    volumes:
+      - ollama-translator-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ollama-judge:
+    image: ollama/ollama:latest
+    container_name: ollama-judge
+    networks: [docswarm]
+    volumes:
+      - ollama-judge-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  judge:
+    build:
+      context: .
+      dockerfile: docker/judge.Dockerfile
+    container_name: judge
+    networks: [docswarm]
+    depends_on:
+      ollama-judge:
+        condition: service_healthy
+    environment:
+      - DOCSWARM_CONFIG=/workspace/config.yaml
+      - OLLAMA_JUDGE_URL=http://ollama-judge:11434
+    volumes:
+      - ./config.yaml:/workspace/config.yaml:ro
+      - ./judge:/workspace/judge
+      - ./data/val/truth:/workspace/data/val/truth:ro
+      - ./trends:/workspace/trends
+    command: ["python", "-m", "judge.judge"]
+
+  developer-agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    container_name: developer-agent
+    networks: [docswarm]
+    depends_on:
+      ollama-translator:
+        condition: service_healthy
+      judge:
+        condition: service_started
+    environment:
+      - DOCSWARM_CONFIG=/workspace/config.yaml
+      - OLLAMA_TRANSLATOR_URL=http://ollama-translator:11434
+    volumes:
+      # Selective mounts for non-leakage. data/val/truth and data/test
+      # are deliberately NOT mounted into this container.
+      - ./module:/workspace/module
+      - ./judge/inbox:/workspace/judge/inbox
+      - ./judge/feedback:/workspace/judge/feedback:ro
+      - ./scripts:/workspace/scripts
+      - ./trends:/workspace/trends
+      - ./orchestration:/workspace/orchestration
+      - ./config.yaml:/workspace/config.yaml
+      - ./AGENT.md:/workspace/AGENT.md:ro
+      - ./DESIGN.md:/workspace/DESIGN.md:ro
+      - ./Makefile:/workspace/Makefile:ro
+      - ./data/train:/workspace/data/train:ro
+      - ./data/val/pdfs:/workspace/data/val/pdfs:ro
+      - ./.git:/workspace/.git
+      - ./secrets:/secrets:ro
+    working_dir: /workspace
+
+networks:
+  docswarm:
+    driver: bridge
+
+volumes:
+  ollama-translator-data:
+  ollama-judge-data:

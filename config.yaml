@@ -1,0 +1,70 @@
+# ----- Project identity -----
+repo:
+  url:             "git@github.com:USER/REPO.git"   # FILL IN before first run
+  branch:          "agent"
+  deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
+
+digitalocean:
+  api_token_env:   "DO_API_TOKEN"                   # name of env var holding the token
+  region:          "nyc2"
+  size:            "gpu-h100x1-80gb"
+  snapshot_id:     ""                               # FILL IN after first `make build-snapshot`
+
+# ----- Models (Ollama tags) -----
+# Agent may revise these in early rounds and commit the change.
+models:
+  vision_small: "llama3.2-vision:11b"
+  vision_large: "minicpm-v:latest"
+  text_small:   "llama3.2:3b"
+  text_large:   "qwen2.5:32b"
+  judge:        "mistral:7b"
+  embedding:    "nomic-embed-text"
+
+# ----- Iteration control -----
+iteration:
+  wall_clock_hours:           12
+  page_budget_seconds:        30
+  epsilon:                    0.005
+  min_rounds_before_plateau:  3
+  plateau_aggregate_floor:    0.30
+  plateau_window:             3
+
+# ----- Broad-mode scoring weights (sum to 1.0) -----
+weights:
+  schema_validity: 0.10
+  article_count:   0.10
+  metadata:        0.15
+  titles:          0.15
+  text:            0.30
+  order:           0.10
+  pages:           0.10
+
+# ----- Judge: non-leakage policy -----
+leakage:
+  allow_structural_hints:        true
+  hint_overlap_filter_threshold: 0.30
+
+# ----- Ollama endpoints (resolved by service name on the docker network) -----
+ollama:
+  translator_url: "http://ollama-translator:11434"
+  judge_url:      "http://ollama-judge:11434"
+
+# ----- Paths (inside containers) -----
+paths:
+  workspace:        "/workspace"
+  train_dir:        "/workspace/data/train"
+  val_pdfs_dir:     "/workspace/data/val/pdfs"
+  val_truth_dir:    "/workspace/data/val/truth"   # judge container only
+  test_dir:         "/workspace/data/test"        # final user review only
+  inbox_dir:        "/workspace/judge/inbox"
+  feedback_dir:     "/workspace/judge/feedback"
+  trends_file:      "/workspace/trends/round_history.json"
+  cache_dir:        "/workspace/.cache/pdf_to_json"
+
+# ----- Local mode overrides -----
+local:
+  models:
+    vision_large: null
+    text_large:   null
+  iteration:
+    wall_clock_hours: 1

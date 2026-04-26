@@ -1,0 +1,12 @@
+.cache/
+.droplet_id
+.droplet_ip
+__pycache__/
+*.pyc
+.pytest_cache/
+judge/inbox/*.json
+judge/feedback/*.json
+data/test/predictions/
+secrets/deploy_key
+secrets/deploy_key.pub
+.venv/
