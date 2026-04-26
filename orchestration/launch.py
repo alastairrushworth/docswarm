@@ -64,38 +64,46 @@ def _doctl_try(*args: str) -> tuple[int, str, str]:
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
-def _regions(do: dict) -> list[str]:
-    """Resolve the ordered list of regions to try when creating a droplet.
-
-    `digitalocean.region` may be a string or a list. If a string, also pull
-    in `digitalocean.region_fallbacks` (list, optional) appended after it.
-    """
-    primary = do.get("region")
-    if isinstance(primary, list):
-        return [str(x) for x in primary if x]
-    fallbacks = do.get("region_fallbacks") or []
-    out = [str(primary)] if primary else []
-    out.extend(str(x) for x in fallbacks if x)
+def _list_or_string(value, fallbacks_key: str | None, do: dict) -> list[str]:
+    """Coerce a config value (string or list) plus optional fallbacks list
+    into a single ordered list of strings."""
+    if isinstance(value, list):
+        return [str(x) for x in value if x]
+    out = [str(value)] if value else []
+    if fallbacks_key:
+        out.extend(str(x) for x in (do.get(fallbacks_key) or []) if x)
     return out
+
+
+def _regions(do: dict) -> list[str]:
+    return _list_or_string(do.get("region"), "region_fallbacks", do)
+
+
+def _sizes(do: dict, key: str = "size") -> list[str]:
+    return _list_or_string(do.get(key), f"{key}_fallbacks", do)
 
 
 def _create_droplet_with_fallback(
     *,
     name: str,
-    size: str,
+    sizes: list[str],
     image: str,
     ssh_key_id: str,
     regions: list[str],
     tag: str,
 ) -> dict:
-    """Try `doctl droplet create` across regions until one succeeds.
+    """Try `doctl droplet create` across (size, region) combinations until
+    one succeeds. Sizes are the outer loop, regions the inner — so we exhaust
+    H200 across all regions before falling back to H100, etc.
 
-    Falls through to the next region only on the specific 422 error
-    "Size is not available in this region." Any other doctl failure is fatal.
+    Falls through only on the 422 "Size is not available in this region"
+    error. Any other doctl failure is fatal.
     Returns the parsed droplet JSON object.
     """
-    for i, region in enumerate(regions):
-        print(f">>> creating droplet {name} ({size}, region={region}) [{i+1}/{len(regions)}]")
+    attempts = [(s, r) for s in sizes for r in regions]
+    total = len(attempts)
+    for i, (size, region) in enumerate(attempts):
+        print(f">>> creating droplet {name} ({size}, region={region}) [{i+1}/{total}]")
         rc, stdout, stderr = _doctl_try(
             "compute", "droplet", "create", name,
             "--region", region,
@@ -110,11 +118,11 @@ def _create_droplet_with_fallback(
             droplets = json.loads(stdout)
             return droplets[0] if isinstance(droplets, list) else droplets
         msg = (stderr or stdout).lower()
-        if "not available in this region" in msg and i < len(regions) - 1:
-            print(f"    {region}: size unavailable; trying next region")
+        if "not available in this region" in msg and i < total - 1:
+            print(f"    {size}@{region}: unavailable; trying next combination")
             continue
         sys.exit(f"droplet create failed:\n{stderr or stdout}")
-    sys.exit(f"size {size} not available in any of {regions}")
+    sys.exit(f"none of {sizes} available in any of {regions}")
 
 
 def _git_branch() -> str:
@@ -136,9 +144,12 @@ def _create_droplet(cfg: dict) -> tuple[str, str]:
     if not regions:
         sys.exit("config.digitalocean.region is empty")
 
+    sizes = _sizes(do)
+    if not sizes:
+        sys.exit("config.digitalocean.size is empty")
     droplet = _create_droplet_with_fallback(
         name=name,
-        size=do["size"],
+        sizes=sizes,
         image=str(snapshot),
         ssh_key_id=str(ssh_key_id),
         regions=regions,
@@ -330,7 +341,9 @@ def snapshot() -> int:
     if not setup_script.is_file():
         sys.exit(f"setup script missing at {setup_script}")
 
-    size = do.get("snapshot_size") or do["size"]
+    sizes = _sizes(do, "snapshot_size") or _sizes(do)
+    if not sizes:
+        sys.exit("config.digitalocean.snapshot_size / size are both empty")
     image = do.get("snapshot_image", "gpu-h100x1-base")
     name = f"docswarm-snapshot-{int(time.time())}"
     models = [v for v in cfg.get("models", {}).values() if v]
@@ -340,7 +353,7 @@ def snapshot() -> int:
 
     droplet = _create_droplet_with_fallback(
         name=name,
-        size=size,
+        sizes=sizes,
         image=image,
         ssh_key_id=str(ssh_key_id),
         regions=regions,

@@ -8,18 +8,24 @@ digitalocean:
   # Region is tried in order — H200 inventory rotates between atl1/nyc2.
   # Add more regions here if DO opens H200 in others.
   region:
-    - "atl1"
     - "nyc2"
-  size:           "gpu-h200x1-141gb"          # the iteration-loop droplet
+    - "atl1"
+  # SKUs are tried top-to-bottom. H200 is the cheapest fit; if all listed
+  # regions are out of H200 we fall back to H100. Each (size, region) pair
+  # is attempted via `doctl droplet create --wait`.
+  size:
+    - "gpu-h200x1-141gb"
+    - "gpu-h100x1-80gb"
   snapshot_id:    "226210880"                          # auto-filled by `make snapshot`
   ssh_key_id:     "55897353"                          # `doctl compute ssh-key list` → ID
   droplet_name:   "docswarm-h200"
   # ----- Snapshot setup (`make snapshot`) -----
   # The setup droplet just downloads ~60GB of model weights and installs
   # Docker / NVIDIA toolkit / Ollama. It must be a GPU SKU available in the
-  # chosen region so the snapshot inherits NVIDIA drivers. As of 2026,
-  # H200 is the only GPU SKU in nyc2/atl1; H100 isn't available anywhere on DO.
-  snapshot_size:  "gpu-h200x1-141gb"          # same as run size; ~$3.50 for one setup
+  # chosen region so the snapshot inherits NVIDIA drivers.
+  snapshot_size:
+    - "gpu-h200x1-141gb"
+    - "gpu-h100x1-80gb"
   snapshot_image: "gpu-h100x1-base"           # NVIDIA AI/ML Ready image (works on H200)
 
 # ----- Models (Ollama tags) -----
