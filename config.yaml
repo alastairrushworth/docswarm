@@ -5,27 +5,22 @@ repo:
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  # Region is tried in order — H200 inventory rotates between atl1/nyc2.
-  # Add more regions here if DO opens H200 in others.
+  # Per `doctl compute region list`, gpu-h200x1-141gb is offered ONLY in nyc2
+  # (and gpu-h100x1-80gb only in ams3). atl1 has no GPU SKUs at all, so a
+  # cross-region fallback would just produce wasted 422s.
   region:
     - "nyc2"
-    - "atl1"
-  # SKUs are tried top-to-bottom. H200 is the cheapest fit; if all listed
-  # regions are out of H200 we fall back to H100. Each (size, region) pair
-  # is attempted via `doctl droplet create --wait`.
   size:
     - "gpu-h200x1-141gb"
-    - "gpu-h100x1-80gb"
-  snapshot_id:    "226210880"                          # auto-filled by `make snapshot`
+  snapshot_id:    "226981253"                          # auto-filled by `make snapshot`
   ssh_key_id:     "55897353"                          # `doctl compute ssh-key list` → ID
   droplet_name:   "docswarm-h200"
   # ----- Snapshot setup (`make snapshot`) -----
-  # The setup droplet just downloads ~60GB of model weights and installs
-  # Docker / NVIDIA toolkit / Ollama. It must be a GPU SKU available in the
-  # chosen region so the snapshot inherits NVIDIA drivers.
+  # Setup droplet pulls ~60GB of model weights and installs Docker / NVIDIA
+  # toolkit / Ollama. Must be a GPU SKU in `region` so the snapshot inherits
+  # NVIDIA drivers.
   snapshot_size:
     - "gpu-h200x1-141gb"
-    - "gpu-h100x1-80gb"
   snapshot_image: "gpu-h100x1-base"           # NVIDIA AI/ML Ready image (works on H200)
 
 # ----- Models (Ollama tags) -----
@@ -76,13 +71,18 @@ ollama:
   context_length:     65536              # Claude Code requires ≥64k
 
 # ----- Paths (inside containers) -----
+# Each document lives in its own folder under a split dir, e.g.
+# data/val/sporting-cyclist-vol1959-06/{original.pdf,transcribed.json}.
+# The folder name is the pdf_id.
 paths:
   workspace:        "/workspace"
   train_dir:        "/workspace/data/train"
-  val_pdfs_dir:     "/workspace/data/val/pdfs"
-  val_truth_dir:    "/workspace/data/val/truth"   # judge container only
+  val_dir:          "/workspace/data/val"
   test_dir:         "/workspace/data/test"        # final user review only
+  pdf_filename:     "original.pdf"                # source PDF inside each doc folder
+  truth_filename:   "transcribed.json"            # ground truth inside each doc folder (judge only)
   inbox_dir:        "/workspace/judge/inbox"
   feedback_dir:     "/workspace/judge/feedback"
   trends_file:      "/workspace/trends/round_history.json"
+  notes_file:       "/workspace/notes/approach.md"   # agent's durable cross-round memory
   cache_dir:        "/workspace/.cache/pdf_to_json"

@@ -7,5 +7,10 @@ __pycache__/
 judge/inbox/*.json
 judge/feedback/*.json
 data/test/predictions/
+# Per-document data folders (original.pdf + transcribed.json) are supplied
+# locally / mounted, not committed. Keep the split dirs via .gitkeep.
+data/train/*/
+data/val/*/
+data/test/*/
 .venv/
 secrets/

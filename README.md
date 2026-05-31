@@ -64,9 +64,9 @@ digitalocean:
 
 ```yaml
 models:
-  coder:     "qwen3-coder:32b"        # Claude Code + judge LLM
-  vision:    "qwen2.5vl:32b"          # translator (multimodal)
-  judge:     "qwen3-coder:32b"
+  coder:     "qwen3.6:35b"            # Claude Code + judge LLM
+  vision:    "qwen3.6:35b"            # translator (multimodal)
+  judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"
 
 iteration:
@@ -111,6 +111,7 @@ judge/                  # runs in its own container
 
 scripts/
   run_validation.py     # iteration loop (translate → broad → claude → repeat)
+  score_train.py        # agent self-scores on train pairs (reuses judge.broad)
   run_test.py           # user-only: frozen module against test set
   report.py             # print round_history table
   export_schema.py      # schema.py → schema/schema.json
@@ -119,13 +120,14 @@ orchestration/
   launch.py             # doctl-driven up / down / snapshot
 
 data/
-  train/{pdfs,truth}/   # readable by the agent (3 hand-curated pairs)
-  val/{pdfs,truth}/     # truth NOT mounted in agent container — judge only
-  test/{pdfs,truth}/    # NOT mounted during dev; final user review only
+  train/<doc-id>/       # original.pdf + transcribed.json; readable by the agent
+  val/<doc-id>/         # original.pdf + transcribed.json; truth read by judge only (honour rule)
+  test/<doc-id>/        # original.pdf + transcribed.json; NOT mounted during dev — final user review
 
 trends/round_history.json   # appended each round, committed
+notes/approach.md           # agent's durable cross-round memory, committed
 ```
 
 ## Hard rules (non-leakage)
 
-The developer-agent container does not mount `data/val/truth/` or `data/test/`. The judge container is the only place ground truth lives. Marking feedback passes through a deterministic n-gram overlap filter before being returned. See `AGENT.md` for the full set of rules.
+The developer-agent container does not mount `data/test/`. Each document folder co-locates `original.pdf` with its `transcribed.json` ground truth, so the agent's `data/val/` mount technically exposes val truth — the agent is forbidden by rule (AGENT.md) from reading `transcribed.json`, and marking feedback passes through a deterministic n-gram overlap filter before being returned. See `AGENT.md` for the full set of rules.

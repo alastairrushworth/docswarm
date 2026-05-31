@@ -3,7 +3,7 @@
 Request files are JSON with at minimum:
   {"mode": "broad"|"marking", "pdf_id": str, "prediction": {...}, ...}
 
-Truth lookup: data/val/truth/{pdf_id}.json (judge-only mount).
+Truth lookup: data/val/{pdf_id}/transcribed.json (judge-only mount).
 """
 from __future__ import annotations
 
@@ -31,8 +31,10 @@ def _load_config() -> dict[str, Any]:
 
 
 def _truth_path(cfg: dict, pdf_id: str) -> Path:
-    base = Path(cfg.get("paths", {}).get("val_truth_dir", "/workspace/data/val/truth"))
-    return base / f"{pdf_id}.json"
+    paths = cfg.get("paths", {})
+    base = Path(paths.get("val_dir", "/workspace/data/val"))
+    truth_name = paths.get("truth_filename", "transcribed.json")
+    return base / pdf_id / truth_name
 
 
 def _load_truth(cfg: dict, pdf_id: str) -> dict | None:

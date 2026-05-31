@@ -116,7 +116,9 @@ doc = Document(
 | Validation | 3 | yes | **no — judge container only** | yes |
 | Test | 3 | no during dev | no | no — final user review |
 
-Code globs the data directories; counts are not hardcoded.
+Each document lives in its own folder `data/<split>/<doc-id>/` containing `original.pdf` and `transcribed.json` (ground truth). The folder name is the `pdf_id`. Code enumerates the per-document folders; counts are not hardcoded.
+
+Note: because truth is co-located with the PDF in each folder, the developer-agent container's `data/val/` mount exposes `transcribed.json` as well. Val non-leakage is therefore an honour-system rule (enforced in AGENT.md and the judge's leakage filter), not a directory-mount boundary.
 
 ## 5. Architecture
 
@@ -125,14 +127,14 @@ Code globs the data directories; counts are not hardcoded.
 Three services on a single Docker network:
 
 1. **`ollama-main`** — the Ollama server. `OLLAMA_MAX_LOADED_MODELS` is set so two big models stay resident together: `models.coder` (drives Claude Code via Ollama's Anthropic-compatible API; also serves the judge's marking LLM) and `models.vision` (drives the translator). Embedding model loads alongside. All three services hit this one Ollama. Two coexist instead of two separate Ollama containers because the Ollama runtime already multiplexes models cleanly and the H200's 141 GB VRAM is plenty for both.
-2. **`developer-agent`** — runs the iteration harness, which between rounds shells out to `claude --print` so Claude Code can edit the translator code. Mounts: project repo (rw), `data/train/` (ro), `data/val/pdfs/` (ro), `judge/inbox/` (rw), `judge/feedback/` (ro). **No mount** for `data/val/truth/` or anything under `data/test/`.
-3. **`judge`** — runs `judge.judge` watching `judge/inbox/`. Mounts: `data/val/truth/` (ro), `judge/inbox/` (ro), `judge/feedback/` (rw).
+2. **`developer-agent`** — runs the iteration harness, which between rounds shells out to `claude --print` so Claude Code can edit the translator code. Mounts: project repo (rw), `data/train/` (ro), `data/val/` (ro), `judge/inbox/` (rw), `judge/feedback/` (ro). **No mount** for anything under `data/test/`. The val mount also contains the co-located `transcribed.json` truth files — the agent is forbidden by rule (not by mount) from reading them.
+3. **`judge`** — runs `judge.judge` watching `judge/inbox/`. Mounts: `data/val/` (ro, reads `<doc>/transcribed.json`), `judge/inbox/` (ro), `judge/feedback/` (rw).
 
 ```
 host (local Mac, with doctl)
 └── DigitalOcean H200 droplet
     ├── docker-compose.yml
-    ├── ollama-main          (qwen3-coder + qwen2.5vl + nomic-embed)
+    ├── ollama-main          (qwen3.6:35b [coder+vision+judge] + nomic-embed)
     ├── developer-agent      (harness + Claude Code)
     └── judge
 ```
@@ -168,9 +170,9 @@ digitalocean:
 # Two big models loaded concurrently in ollama-main; embedding alongside.
 # Agent may revise these in early rounds and commit the change.
 models:
-  coder:     "qwen3-coder:32b"     # Claude Code + judge LLM
-  vision:    "qwen2.5vl:32b"       # translator (multimodal)
-  judge:     "qwen3-coder:32b"
+  coder:     "qwen3.6:35b"         # Claude Code + judge LLM
+  vision:    "qwen3.6:35b"         # translator (multimodal)
+  judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"
 
 # ----- Iteration control -----
@@ -319,7 +321,7 @@ This is the user's at-a-glance view of how the run is going.
 ### 9.1 Two modes
 
 - **Broad mode** is the gate. Full-document submission. Returns weighted continuous scores plus categorical hints. No pass/fail anywhere.
-- **Marking mode** is targeted. Agent submits a partial output asking for scoring on a specific scope. Used for iterative debugging.
+- **Marking mode** is targeted. Agent submits a freeform question plus a focused JSON slice and gets back a qualitative verdict + guidance. Used for iterative debugging.
 
 Both modes obey non-leakage rules (§9.5).
 
@@ -341,27 +343,21 @@ The aggregate is the user's primary signal. Component scores diagnose *what* wen
 
 ### 9.3 Marking mode — targeted scoring
 
-The agent submits:
+The agent submits a freeform question plus a focused JSON slice (`marking.py` is the authority; AGENT.md "Marking request shape" mirrors it):
 
 ```json
 {
   "mode": "marking",
   "pdf_id": "issue_1892_06_03",
-  "scope": {
-    "article_index": 7,
-    "fields": ["text", "title"]
-  },
-  "prediction": { ... full or partial document ... }
+  "question": "I think article 4 is cut off. Is the body materially incomplete?",
+  "focus": {
+    "path": "articles[4].text",
+    "value": ["paragraph 1...", "paragraph 2..."]
+  }
 }
 ```
 
-The judge returns scores only for the requested scope, plus a categorical hint if the score is low. Other valid scopes:
-
-- `{"metadata_field": "publisher.address"}`
-- `{"article_index": 7, "fields": "all"}`
-- `{"section": "metadata"}`
-
-This lets the agent test focused changes (e.g. "I changed how I detect verse, score article 7 again") without re-running the full document end-to-end.
+`focus.path` is a JSON path into the prediction (`articles[i]`, `articles[i].text`, `magazine.publisher.address`, etc.); `focus.value` is the slice to grade (8KB cap). The judge resolves the matching truth slice via Hungarian alignment and answers the freeform question. This lets the agent test focused changes (e.g. "I changed how I detect verse, look at article 7 again") without re-running the full document end-to-end.
 
 ### 9.4 Order scoring
 
@@ -426,16 +422,17 @@ Broad mode:
 }
 ```
 
-Marking mode:
+Marking mode (freeform, LLM-driven — qualitative not numeric):
 
 ```json
 {
   "mode": "marking",
   "pdf_id": "issue_1892_06_03",
-  "scope": {"article_index": 7, "fields": ["text", "title"]},
-  "scores": {"text": 0.62, "title": 0.95},
-  "categorical_errors": [{"category": "verse_misformatted_as_prose"}],
-  "hints": ["This article appears to be verse; predicted text uses prose paragraph splits."]
+  "question": "Is article 4's body materially incomplete?",
+  "focus_path": "articles[4].text",
+  "verdict": "incomplete",
+  "feedback": "The predicted body is materially shorter than truth; looks truncated near the end.",
+  "suggested_focus_path": "articles[4].text"
 }
 ```
 
@@ -473,16 +470,18 @@ project/
 ├── orchestration/
 │   └── launch.py               # doctl-driven up / down / snapshot
 ├── data/
-│   ├── train/{pdfs,truth}/
-│   ├── val/{pdfs,truth}/
-│   └── test/{pdfs,truth}/
+│   ├── train/<doc-id>/{original.pdf,transcribed.json}
+│   ├── val/<doc-id>/{original.pdf,transcribed.json}
+│   └── test/<doc-id>/{original.pdf,transcribed.json}
 ├── module/
 │   ├── pyproject.toml
 │   ├── pdf_to_json/
 │   │   ├── pipeline.py         # orchestration of vision/text passes
 │   │   ├── cache.py            # per-page intermediate caching (content-hashed)
 │   │   ├── assemble.py         # IR → schema-conformant JSON
-│   │   └── schema.py           # pydantic — source of truth for the schema
+│   │   ├── schema.py           # pydantic — source of truth for the schema
+│   │   ├── tools/              # (optional) runtime tools if agent goes tool-using
+│   │   └── agents/             # (optional) specialist sub-agent definitions
 │   └── tests/
 ├── judge/
 │   ├── judge.py
@@ -493,8 +492,11 @@ project/
 │   └── feedback/
 ├── trends/
 │   └── round_history.json      # appended each round, committed
+├── notes/
+│   └── approach.md             # agent's durable cross-round memory, committed
 ├── scripts/
 │   ├── run_validation.py
+│   ├── score_train.py          # agent self-scores on train (reuses judge.broad)
 │   ├── run_test.py             # user-only
 │   └── report.py               # print trend table
 ├── schema/
@@ -524,12 +526,14 @@ H. **The non-leakage filter is best-effort.** A clever paraphrase from the judge
 
 ## 13. AGENT.md (required contents — lives in repo root, read by Claude Code first)
 
-- **Hard rules.** Paths the agent must not read: `data/val/truth/`, `data/test/`. Not mounted; do not attempt via network or shell.
+- **Hard rules.** Paths the agent must not read: the `data/val/<doc>/transcribed.json` truth files, `data/test/`. `data/test/` is not mounted; the val truth files are mounted (co-located with the PDFs) but reading them is a leakage violation. Do not attempt via network or shell.
 - **Source of truth.** All tunable parameters live in `config.yaml`. The schema's source of truth is `module/pdf_to_json/schema.py`. Hardcoded constants in code are forbidden — read from config.
 - **Submission protocol.**
   - Marking: drop `judge/inbox/{pdf_id}__marking__{ts}.json`. Read `judge/feedback/{same-name}.json`.
   - Broad: drop `judge/inbox/{pdf_id}__broad__round{n}.json`. Read response from feedback dir.
-- **Iteration discipline.** Use marking liberally during a round to debug specific issues. Run broad evaluation once at end of round.
+- **Iteration discipline.** Use marking liberally during a round to debug specific issues. Develop and self-score against the train pairs with `scripts/score_train.py` (same broad metric as the val gate) before relying on the once-per-round val eval. Run broad evaluation once at end of round.
+- **Cross-round memory.** The agent is re-spawned fresh each round; its only working memory is `notes/approach.md` (injected into every round prompt) plus committed code. It must read and update those notes each round.
+- **Translator shape.** Internals are the agent's call — specialist passes or tool-using sub-agents (`module/pdf_to_json/tools/`, `module/pdf_to_json/agents/`). The starter `ollama_client` is `/api/generate`-only; runtime tool-calling requires extending it to `/api/chat`.
 - **Stop signals.** Wall-clock and plateau detection per `config.yaml`. Do not implement other stop conditions.
 - **Posture.** Make best efforts to close every error. Graded scores are *not* permission to settle for low component scores — they are protection against indefinite blocking on a single hard issue. If a component score is stuck, try a different approach rather than quitting on it.
 - **Commit discipline.** Per-round commit, message format: `round {n}: aggregate {score:.3f} (Δ{delta:+.3f}); {component summary}`.
@@ -538,4 +542,4 @@ H. **The non-leakage filter is best-effort.** A clever paraphrase from the judge
 - **Model selection.** Use names from `config.yaml`. May revise these in early rounds and commit the change; do not pull arbitrary new models that aren't in the snapshot without rebuilding it.
 - **VRAM allocation.** Query `nvidia-smi` at startup. Try to keep both translator-large and judge resident; fall back to swapping if necessary. Log the choice.
 - **Caching.** Cache vision-model per-page outputs across rounds, keyed by **content hash** of the PDF.
-- **The deliverable is the module.** Reasoning transcripts and scratch notes are not the product.
+- **The deliverable is the module.** Throwaway scratch is not the product, but durable approach notes (`notes/approach.md`) are expected and committed — keep them separate from the module artifact.

@@ -53,7 +53,7 @@ Respond with a single JSON object, no prose outside it:
 
 
 def _load_judge_model() -> str:
-    return str(get("models.judge", "qwen3-coder:32b"))
+    return str(get("models.judge", "qwen3.6:35b"))
 
 
 def _shrink(value: Any, cap: int = FOCUS_VALUE_BYTE_CAP) -> tuple[Any, bool]:

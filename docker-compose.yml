@@ -37,7 +37,8 @@ services:
     volumes:
       - ./config.yaml:/workspace/config.yaml:ro
       - ./judge:/workspace/judge
-      - ./data/val/truth:/workspace/data/val/truth:ro
+      # Ground truth (transcribed.json) lives inside each val doc folder; judge sees all of val.
+      - ./data/val:/workspace/data/val:ro
       - ./trends:/workspace/trends
     restart: unless-stopped
     command: ["python", "-m", "judge.judge"]
@@ -62,20 +63,27 @@ services:
       - ANTHROPIC_AUTH_TOKEN=ollama
       - ANTHROPIC_API_KEY=
     volumes:
-      # Selective mounts for non-leakage. data/val/truth and data/test
-      # are deliberately NOT mounted into this container.
+      # data/test is deliberately NOT mounted into this container. NOTE: val truth
+      # (transcribed.json) is co-located with original.pdf in each data/val/<doc>/
+      # folder, so mounting val for the PDFs also exposes ground truth here.
       - ./module:/workspace/module
+      # Judge package (ro) so the agent can self-score on TRAIN via
+      # scripts/score_train.py, reusing judge.broad. inbox/feedback are nested
+      # rw/ro mounts below and take precedence over this read-only parent.
+      - ./judge:/workspace/judge:ro
       - ./judge/inbox:/workspace/judge/inbox
       - ./judge/feedback:/workspace/judge/feedback:ro
       - ./scripts:/workspace/scripts
       - ./trends:/workspace/trends
+      # Durable cross-round memory the agent maintains and commits.
+      - ./notes:/workspace/notes
       - ./orchestration:/workspace/orchestration
       - ./config.yaml:/workspace/config.yaml
       - ./AGENT.md:/workspace/AGENT.md:ro
       - ./DESIGN.md:/workspace/DESIGN.md:ro
       - ./Makefile:/workspace/Makefile:ro
       - ./data/train:/workspace/data/train:ro
-      - ./data/val/pdfs:/workspace/data/val/pdfs:ro
+      - ./data/val:/workspace/data/val:ro
       - ./.git:/workspace/.git
       - ./secrets:/secrets:ro
     working_dir: /workspace

@@ -4,10 +4,10 @@ You are the developer agent for this project. Read this file first, then `DESIGN
 
 ## Hard rules — non-negotiable
 
-- **Never read** `data/val/truth/` or anything under `data/test/`. These are not mounted into your container; do not try to obtain them via network, shell, git history of other branches, or any other channel.
+- **Never read** the ground-truth `data/val/<doc>/transcribed.json` files (co-located with each `original.pdf`) or anything under `data/test/`. `data/test/` is not mounted; the val truth files are mounted alongside the PDFs but reading them is a leakage violation — do not open them, and do not try to obtain test data via network, shell, git history of other branches, or any other channel.
 - **Source of truth for tunables**: `config.yaml`. Hardcoded constants in code are forbidden. Read from config.
 - **Source of truth for the schema**: `module/pdf_to_json/schema.py`. Treat this file (not `DESIGN.md` §3) as authoritative; revise it in `schema.py` if needed.
-- **The deliverable is the module** in `module/pdf_to_json/`. Reasoning transcripts and scratch notes are not the product.
+- **The deliverable is the module** in `module/pdf_to_json/`. Throwaway scratch (one-off probe scripts, debug dumps) is not the product — but durable approach notes ARE expected (see "Your memory across rounds" below). Keep the two separate: the module is the artifact; the notes are how you get there.
 
 ## What is fixed vs what you design
 
@@ -30,6 +30,19 @@ You are the developer agent for this project. Read this file first, then `DESIGN
 
 The bar is whatever produces a good aggregate score. Single-prompt-per-page is a baseline, not a target.
 
+## Specialist agents & tools
+
+The translator's internal shape is **your call** — the only fixed thing is the `pdf_to_json(pdf_path) -> dict` entry point. Two shapes are explicitly blessed; you may pick either, mix them, or change your mind between rounds:
+
+1. **Specialist passes / sub-modules** — plain Python functions, each owning one concern (verse detection, metadata extraction, continuation tracing, OCR-typo preservation) and driving its own LLM prompts. Simplest; works with the starter `ollama_client`.
+2. **Tool-using sub-agents** — a runtime agent loop where a model is given tools and decides which to call. If you go this way:
+   - Put runtime tools in `module/pdf_to_json/tools/` and specialist-agent definitions/prompts in `module/pdf_to_json/agents/` (create these dirs). They are part of the deliverable and must be committed.
+   - **The starter `ollama_client.generate` only calls `/api/generate` (single prompt + images) — it cannot do tool-calling.** You must extend the client to Ollama's `/api/chat` with a `tools=` array (qwen3.6 supports tool calls) before any runtime tool loop will work. This is allowed and expected if you choose this path.
+
+You may also create **Claude Code sub-agents for your own development work** (not the deliverable) by committing `.claude/agents/*.md` definitions — e.g. a prompt-tuning agent or a schema agent. These persist across rounds like any committed file.
+
+Prefer the simplest shape that hits the score. Don't build an agent framework speculatively; reach for it when a specialist pass plateaus.
+
 ## How rounds work
 
 The harness (`scripts/run_validation.py`) owns the round loop. Each round:
@@ -44,6 +57,21 @@ The harness (`scripts/run_validation.py`) owns the round loop. Each round:
 
 - Use **marking mode** liberally — freeform questions about specific JSON slices. Cheap, frequent.
 - Edit code, write tests for the new code, run them. When you have something worth grading, commit and exit.
+
+### Your fast inner loop: TRAIN self-scoring
+
+You can read the **train** pairs *with* ground truth (`data/train/<doc>/{original.pdf,transcribed.json}`) — only val/test truth is off-limits. Use this. `python scripts/score_train.py` runs your translator over all train docs and scores them with the **same** `judge.broad` metric and `config.yaml` weights the val gate uses, so the numbers are directly comparable to the round trend. Iterate against train (many cheap cycles) before you rely on the once-per-round val gate over 3 noisy PDFs. Pass doc-ids to score a subset: `python scripts/score_train.py the-bearings-vol5-18`.
+
+### Your memory across rounds
+
+Each round the harness starts you **fresh** — a new process with no recollection of prior rounds except (a) the committed code and (b) your notes file at `notes/approach.md`. The notes file is injected verbatim into your prompt every round, along with the full score trajectory. **It is your only working memory.** Treat maintaining it as part of the job:
+
+- Read it first, before deciding what to do.
+- Each round, record: the hypothesis you tested, what you changed, the train self-score and/or val result you observed, and what to try next.
+- Log **dead-ends** explicitly so you don't burn future rounds re-trying them.
+- Commit `notes/approach.md` alongside your code changes.
+
+If the harness tells you the last round regressed vs your best, take it seriously: revert or change approach rather than digging deeper into a losing path.
 
 ## Submission protocol (judge)
 

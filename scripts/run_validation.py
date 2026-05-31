@@ -44,12 +44,19 @@ def _load_cfg() -> dict[str, Any]:
 
 
 def _val_pdfs(cfg: dict) -> list[Path]:
-    d = Path(cfg.get("paths", {}).get("val_pdfs_dir", str(ROOT / "data/val/pdfs")))
-    return sorted([p for p in d.glob("*.pdf")])
+    paths = cfg.get("paths", {})
+    d = Path(paths.get("val_dir", str(ROOT / "data/val")))
+    pdf_name = paths.get("pdf_filename", "original.pdf")
+    if not d.is_dir():
+        return []
+    return sorted(
+        sub / pdf_name for sub in d.iterdir() if sub.is_dir() and (sub / pdf_name).is_file()
+    )
 
 
 def _pdf_id(p: Path) -> str:
-    return p.stem
+    # Each document lives in its own folder; the folder name is the id.
+    return p.parent.name
 
 
 def _submit_broad(cfg: dict, pdf_id: str, round_n: int, prediction: dict) -> dict:
@@ -178,7 +185,7 @@ def _translate_and_submit(cfg: dict, round_n: int, p: Path) -> dict:
 def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
     pdfs = _val_pdfs(cfg)
     if not pdfs:
-        raise SystemExit(f"no validation PDFs found in {cfg['paths']['val_pdfs_dir']}")
+        raise SystemExit(f"no validation PDFs found in {cfg['paths']['val_dir']}")
 
     pdf_concurrency = max(1, int(cfg.get("iteration", {}).get("pdf_concurrency", 1)))
 
@@ -219,45 +226,120 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
     return entry
 
 
-def _developer_agent_prompt(round_n: int, prev_entry: dict) -> str:
+def _read_notes(cfg: dict) -> str:
+    p = Path(cfg.get("paths", {}).get("notes_file", str(ROOT / "notes/approach.md")))
+    if p.is_file():
+        return p.read_text().strip()
+    return "(empty — no notes recorded yet)"
+
+
+def _trend_summary(cfg: dict) -> str:
+    """Compact one-line-per-round history so the agent sees the whole trajectory,
+    not just the last round."""
+    p = Path(cfg.get("paths", {}).get("trends_file", str(ROOT / "trends/round_history.json")))
+    if not p.is_file():
+        return "(no rounds graded yet)"
+    try:
+        history = json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return "(trend file unreadable)"
+    lines = []
+    for e in history:
+        c = e.get("components", {})
+        lines.append(
+            f"  round {e.get('round')}: agg={e.get('aggregate', 0.0):.3f} "
+            f"[titles {c.get('titles', 0.0):.2f}, text {c.get('text', 0.0):.2f}, "
+            f"order {c.get('order', 0.0):.2f}, meta {c.get('metadata', 0.0):.2f}, "
+            f"count {c.get('article_count', 0.0):.2f}, schema {c.get('schema_validity', 0.0):.2f}, "
+            f"pages {c.get('pages', 0.0):.2f}]"
+        )
+    return "\n".join(lines) if lines else "(no rounds graded yet)"
+
+
+def _best_status(prev_entry: dict, best_entry: dict | None) -> str:
+    prev_agg = prev_entry.get("aggregate", 0.0)
+    if best_entry is None or best_entry.get("round") == prev_entry.get("round"):
+        return f"Round {prev_entry.get('round')} ({prev_agg:.3f}) is your best so far. Build on it."
+    best_agg = best_entry.get("aggregate", 0.0)
+    return (
+        f"WARNING: round {prev_entry.get('round')} ({prev_agg:.3f}) REGRESSED vs your best, "
+        f"round {best_entry.get('round')} ({best_agg:.3f}). Consider reverting that change "
+        f"(`git revert`/`git checkout`) or trying a materially different approach — do not "
+        f"keep iterating on a path that lost ground."
+    )
+
+
+def _developer_agent_prompt(
+    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None
+) -> str:
     components = prev_entry.get("components", {})
     per_pdf = prev_entry.get("per_pdf", [])
     cat_errors = prev_entry.get("categorical_errors_per_pdf", [])
+    notes = _read_notes(cfg)
+    history = _trend_summary(cfg)
+    best_status = _best_status(prev_entry, best_entry)
+    notes_path = cfg.get("paths", {}).get("notes_file", "notes/approach.md")
     return f"""You are the developer agent for docswarm. This is round {round_n}.
 
 Read AGENT.md first if you have not. The deliverable is `module/pdf_to_json/`;
 the public entry point `pdf_to_json(pdf_path: str) -> dict` is fixed but
-everything inside is yours to rewrite.
+everything inside is yours to rewrite. You may build the translator as
+specialist passes OR as tool-using sub-agents — your call. See AGENT.md
+"Specialist agents & tools".
 
-Previous broad-eval summary (round {round_n - 1}):
+=== YOUR NOTES (durable across rounds — `{notes_path}`) ===
+This is your memory. It is the accumulated record of what you have tried, what
+worked, what failed, and what to try next. Read it before deciding anything.
+{notes}
+=== END NOTES ===
+
+Score trajectory so far:
+{history}
+
+{best_status}
+
+Latest round ({round_n - 1}) detail:
 - aggregate (weighted mean across val PDFs): {prev_entry.get('aggregate', 0.0):.3f}
 - components: {json.dumps(components)}
 - per-pdf aggregates: {json.dumps(per_pdf)}
 - categorical errors per pdf: {json.dumps(cat_errors)}
 
 Your task this turn:
-1. Identify the weakest component(s) and form a hypothesis.
-2. Optionally probe the judge in marking mode by writing JSON to
+1. Read your notes and the trajectory. Identify the weakest component(s) and
+   form a hypothesis. If a component has been stuck for several rounds, change
+   the approach rather than retuning the same one.
+2. Develop and self-check against the TRAIN pairs, which you ARE allowed to read
+   with ground truth: `python scripts/score_train.py` runs your translator over
+   `data/train/` and scores it with the same broad metric the judge uses. This
+   is your fast inner loop — iterate here before relying on the val gate.
+3. Optionally probe the judge in marking mode by writing JSON to
    `judge/inbox/{{pdf_id}}__marking__{{tag}}.json` and reading the matching
    file from `judge/feedback/`. Marking shape is in AGENT.md.
-3. Edit code in `module/pdf_to_json/` (or add new files there) to address
-   the weakness. Keep the public entry point and schema source-of-truth.
-4. Run `python scripts/run_test_smoke.py` if it exists, or write a quick
-   unit test, before committing.
-5. `git add` your changes, commit with a clear message, and exit.
+4. Edit code in `module/pdf_to_json/` (or add files/tools/sub-agents there) to
+   address the weakness. Keep the public entry point and schema source-of-truth.
+5. Write a quick unit test for any new non-LLM helper and run `pytest`.
+6. UPDATE YOUR NOTES at `{notes_path}`: record this round's hypothesis, what you
+   changed, the train self-score you observed, and what to try next. This is the
+   only state that survives to the next round besides your committed code.
+7. `git add` your changes (including the notes file), commit with a clear
+   message, and exit.
 
 The harness will run the next broad evaluation as soon as you exit. Do NOT
-attempt to run broad eval yourself. Do NOT read `data/val/truth/` or
-`data/test/` — those are not mounted.
+attempt to run broad eval yourself. Do NOT read the ground truth
+`data/val/<doc>/transcribed.json` (co-located with the PDFs) or anything under
+`data/test/` — reading val/test truth is a leakage violation even though val is
+mounted. (Train truth is fair game — that is what `score_train.py` uses.)
 """
 
 
-def _run_developer_agent(cfg: dict, round_n: int, prev_entry: dict) -> None:
+def _run_developer_agent(
+    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None
+) -> None:
     if shutil.which("claude") is None:
         logger.warning("claude CLI not on PATH; skipping developer-agent turn")
         return
-    model = cfg.get("models", {}).get("coder", "qwen3-coder:32b")
-    prompt = _developer_agent_prompt(round_n, prev_entry)
+    model = cfg.get("models", {}).get("coder", "qwen3.6:35b")
+    prompt = _developer_agent_prompt(cfg, round_n, prev_entry, best_entry)
     logger.info("round %d: invoking Claude Code (model=%s)", round_n, model)
     cmd = [
         "claude", "--print",
@@ -293,12 +375,13 @@ def main() -> int:
     round_n = 0
     prev_aggregate = None
     prev_entry: dict[str, Any] | None = None
+    best_entry: dict[str, Any] | None = None
 
     while time.monotonic() < deadline:
         round_n += 1
 
         if round_n > 1 and prev_entry is not None and not args.no_agent:
-            _run_developer_agent(cfg, round_n, prev_entry)
+            _run_developer_agent(cfg, round_n, prev_entry, best_entry)
 
         entry = run_round(cfg, round_n)
         agg = entry["aggregate"]
@@ -318,6 +401,9 @@ def main() -> int:
             rounds_since_best = 0
         else:
             rounds_since_best += 1
+        # Track the best entry for regression-awareness in the next prompt.
+        if best_entry is None or agg > best_entry.get("aggregate", -math.inf):
+            best_entry = entry
 
         prev_aggregate = agg
         prev_entry = entry

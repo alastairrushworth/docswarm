@@ -27,20 +27,26 @@ def main() -> int:
     with cfg_path.open() as f:
         cfg = yaml.safe_load(f)
 
-    test_dir = Path(cfg.get("paths", {}).get("test_dir", str(ROOT / "data/test")))
-    pdf_dir = test_dir / "pdfs"
+    paths = cfg.get("paths", {})
+    test_dir = Path(paths.get("test_dir", str(ROOT / "data/test")))
+    pdf_name = paths.get("pdf_filename", "original.pdf")
     out_dir = test_dir / "predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    pdfs = sorted(pdf_dir.glob("*.pdf"))
+    # Each document lives in its own folder; the folder name is the pdf_id.
+    pdfs = sorted(
+        sub / pdf_name for sub in test_dir.iterdir()
+        if sub.is_dir() and (sub / pdf_name).is_file()
+    ) if test_dir.is_dir() else []
     if not pdfs:
-        logger.error("no test PDFs in %s", pdf_dir)
+        logger.error("no test PDFs in %s", test_dir)
         return 1
 
     for p in pdfs:
-        logger.info("translating %s", p.name)
+        pid = p.parent.name
+        logger.info("translating %s", pid)
         pred = pdf_to_json(str(p))
-        out = out_dir / f"{p.stem}.json"
+        out = out_dir / f"{pid}.json"
         out.write_text(json.dumps(pred, indent=2))
         logger.info("wrote %s", out)
 
