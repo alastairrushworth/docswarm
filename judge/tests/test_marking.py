@@ -40,8 +40,8 @@ def test_missing_path_short_circuits():
 
 def test_llm_response_passes_through():
     fake = {
-        "verdict": "incomplete",
-        "feedback": "the body is shorter than truth",
+        "verdict": "partially_present",
+        "feedback": "the body is shorter than expected",
         "suggested_focus_path": "articles[0].text",
     }
     with patch("judge.marking.llm_client.chat_json", return_value=fake):

@@ -62,6 +62,19 @@ leakage:
   allow_structural_hints:        true
   hint_overlap_filter_threshold: 0.30
 
+# ----- Judge: essence-over-form scoring -----
+# Surface-form differences (punctuation, case, accents, abbreviation, OCR noise)
+# must not be marked wrong. Per-field metadata and per-article titles score
+# graded partial credit; at/above their band they snap to full credit.
+# alignment_floor is the minimum combined title+text similarity for two articles
+# to be considered the same one — below it, a predicted article is treated as
+# extra and an unmatched truth article as missing, rather than force-paired.
+judge:
+  alignment_floor: 0.15
+  bands:
+    metadata: 0.90
+    title:    0.85
+
 # ----- Single Ollama instance, two models loaded, shared by translator + agent + judge -----
 ollama:
   url:                "http://ollama-main:11434"

@@ -68,6 +68,7 @@ def _train_docs(cfg: dict, only: list[str]) -> list[tuple[str, Path, Path]]:
 def main() -> int:
     cfg = _load_cfg()
     weights = cfg.get("weights", {})
+    jp = broad.params_from_config(cfg)
     only = sys.argv[1:]
 
     docs = _train_docs(cfg, only)
@@ -83,7 +84,10 @@ def main() -> int:
         logger.info("translating %s", pdf_id)
         pred = pdf_to_json(str(pdf))
         truth = json.loads(truth_path.read_text())
-        result = broad.evaluate(pred, truth, weights, allow_structural_hints=True)
+        result = broad.evaluate(
+            pred, truth, weights, allow_structural_hints=True,
+            bands=jp["bands"], alignment_floor=jp["alignment_floor"],
+        )
         agg = result["aggregate"]
         aggs.append(agg)
         comps = {k: result["components"][k]["score"] for k in _COMPONENTS}
@@ -91,8 +95,8 @@ def main() -> int:
             comp_totals[k] += comps[k]
         comp_str = ", ".join(f"{k} {comps[k]:.2f}" for k in _COMPONENTS)
         print(f"{pdf_id:35s} agg={agg:.3f}  [{comp_str}]")
-        if result.get("categorical_errors"):
-            print(f"    errors: {json.dumps(result['categorical_errors'])}")
+        for hint in result.get("hints", []):
+            print(f"    hint: {hint}")
 
     n = len(aggs)
     mean_agg = sum(aggs) / n

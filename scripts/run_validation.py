@@ -221,6 +221,10 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
             {"pdf_id": _pdf_id(p), "errors": fb.get("categorical_errors", [])}
             for p, fb in zip(pdfs, feedbacks)
         ],
+        "hints_per_pdf": [
+            {"pdf_id": _pdf_id(p), "hints": fb.get("hints", [])}
+            for p, fb in zip(pdfs, feedbacks)
+        ],
     }
     _append_trend(cfg, entry)
     return entry
@@ -256,6 +260,19 @@ def _trend_summary(cfg: dict) -> str:
     return "\n".join(lines) if lines else "(no rounds graded yet)"
 
 
+def _format_hints(hints_per_pdf: list[dict]) -> str:
+    """Render the judge's per-component guidance hints for the prompt. These are
+    non-prescriptive — they point at what/where to investigate, not the fix."""
+    blocks = []
+    for entry in hints_per_pdf:
+        hints = entry.get("hints") or []
+        if not hints:
+            continue
+        lines = "\n".join(f"  - {h}" for h in hints)
+        blocks.append(f"{entry.get('pdf_id')}:\n{lines}")
+    return "\n".join(blocks) if blocks else "(no hints — components at full credit)"
+
+
 def _best_status(prev_entry: dict, best_entry: dict | None) -> str:
     prev_agg = prev_entry.get("aggregate", 0.0)
     if best_entry is None or best_entry.get("round") == prev_entry.get("round"):
@@ -275,6 +292,7 @@ def _developer_agent_prompt(
     components = prev_entry.get("components", {})
     per_pdf = prev_entry.get("per_pdf", [])
     cat_errors = prev_entry.get("categorical_errors_per_pdf", [])
+    hints_block = _format_hints(prev_entry.get("hints_per_pdf", []))
     notes = _read_notes(cfg)
     history = _trend_summary(cfg)
     best_status = _best_status(prev_entry, best_entry)
@@ -303,6 +321,10 @@ Latest round ({round_n - 1}) detail:
 - components: {json.dumps(components)}
 - per-pdf aggregates: {json.dumps(per_pdf)}
 - categorical errors per pdf: {json.dumps(cat_errors)}
+
+Judge hints (non-prescriptive — they tell you what/where to investigate, never
+the fix or the expected value; use them to improve the translator process):
+{hints_block}
 
 Your task this turn:
 1. Read your notes and the trajectory. Identify the weakest component(s) and

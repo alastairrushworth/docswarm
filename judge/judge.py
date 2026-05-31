@@ -65,7 +65,11 @@ def handle(req: dict[str, Any], cfg: dict) -> dict[str, Any]:
     truth_strings = collect_truth_strings(truth)
 
     if mode == "broad":
-        result = broad.evaluate(prediction, truth, weights, allow_structural)
+        jp = broad.params_from_config(cfg)
+        result = broad.evaluate(
+            prediction, truth, weights, allow_structural,
+            bands=jp["bands"], alignment_floor=jp["alignment_floor"],
+        )
         result["hints"] = filter_hints(result.get("hints", []), truth_strings, threshold)
         return {
             "mode": "broad",

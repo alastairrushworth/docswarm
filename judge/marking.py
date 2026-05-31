@@ -18,6 +18,15 @@ logger = logging.getLogger("judge.marking")
 
 FOCUS_VALUE_BYTE_CAP = 8 * 1024  # 8KB
 
+VALID_VERDICTS = {
+    "equivalent",            # same information; only surface-form differences (if any)
+    "minor_format_diff",     # same information, noticeable but immaterial form differences
+    "partially_present",     # some required information present, some missing/truncated
+    "materially_different",  # information is wrong or substantively different
+    "missing",               # the expected information is absent from the slice
+    "unverifiable",          # the slice is too small/wrong-scoped to assess
+}
+
 SYSTEM_PROMPT = """\
 You are a feedback grader for an automated PDF-to-JSON translator. You hold the
 ground-truth JSON for the document under evaluation. The translator's developer
@@ -28,25 +37,40 @@ You see TWO JSON documents only — the predicted slice and the truth slice. You
 do NOT have access to the source PDF. Do not reason about page layout, columns,
 margins, image regions, or anything visual.
 
+JUDGE THE ESSENCE, NOT THE FORM. There is no single canonical transcription.
+Do NOT penalize differences that preserve the same information:
+- punctuation, capitalization, accents, whitespace;
+- abbreviation vs spelled-out forms ("Pl." vs "Place", "Chas." vs "Charles");
+- OCR-style character noise that a reader would still read as the same word;
+- how prose is split into paragraphs, or verse into lines;
+- reasonable article-segmentation or ordering choices where the content is the same.
+DO flag substantive problems: missing or truncated content, factually wrong
+values (wrong date/volume/name), verse rendered as prose (or vice versa), and
+clearly incomplete bodies.
+
 HARD RULES — non-negotiable:
 1. Never quote verbatim from the truth. Never paraphrase a sentence from the
    truth. If you do, your output will be redacted.
 2. Speak in JSON-relative, qualitative terms: "the body is materially shorter
-   than truth", "this article is verse, not prose", "the publisher address
-   appears truncated", "the date does not match".
+   than expected", "this should be verse, not prose", "the address looks
+   truncated", "the year does not match".
 3. Suggest WHERE in the JSON to look (`articles[i].text`, `magazine.editor`),
-   not WHAT TO WRITE.
-4. If the prediction is correct at this slice, say so plainly with verdict
-   "correct".
-5. If the focus slice is too small to assess (e.g. a single article body but
-   the question is about ordering), set verdict "unverifiable" and ask for a
-   different focus.
-6. Stay under 80 words in `feedback`.
+   not WHAT TO WRITE. Never give the corrected value.
+4. Stay under 80 words in `feedback`.
+
+Choose the single best verdict:
+- "equivalent": same information (ignore pure form differences).
+- "minor_format_diff": same information, only immaterial form differences.
+- "partially_present": some expected information present, some missing/truncated.
+- "materially_different": information is wrong or substantively different.
+- "missing": the expected information is absent.
+- "unverifiable": the slice is too small or wrong-scoped to assess; ask for a
+  different focus.
 
 Respond with a single JSON object, no prose outside it:
 {
-  "verdict": "correct" | "incomplete" | "wrong" | "unverifiable",
-  "feedback": "string, ≤80 words",
+  "verdict": "equivalent" | "minor_format_diff" | "partially_present" | "materially_different" | "missing" | "unverifiable",
+  "feedback": "string, ≤80 words, JSON-relative guidance with no quoted truth and no corrected value",
   "suggested_focus_path": "articles[i].text" | "magazine.publisher" | null
 }
 """
@@ -95,7 +119,7 @@ def _build_user_prompt(
 
 def _coerce_response(raw: dict[str, Any]) -> dict[str, Any]:
     verdict = raw.get("verdict", "unverifiable")
-    if verdict not in {"correct", "incomplete", "wrong", "unverifiable"}:
+    if verdict not in VALID_VERDICTS:
         verdict = "unverifiable"
     feedback = str(raw.get("feedback", "")).strip()
     suggested = raw.get("suggested_focus_path")
@@ -149,7 +173,9 @@ def evaluate(
             system=SYSTEM_PROMPT,
             user=user,
             timeout=60.0,
-            options={"temperature": 0.2},
+            # Deterministic: identical prediction → identical verdict round-to-round,
+            # so the agent isn't chasing judge noise.
+            options={"temperature": 0.0, "seed": 0},
         )
     except Exception as e:
         logger.warning("judge LLM call failed: %s", e)

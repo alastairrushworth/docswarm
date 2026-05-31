@@ -327,17 +327,19 @@ Both modes obey non-leakage rules (§9.5).
 
 ### 9.2 Broad mode — weighted continuous scoring
 
-Every component is a continuous score in [0, 1]. The aggregate is a weighted mean using `weights` from `config.yaml`.
+Every component is a continuous score in [0, 1]. The aggregate is a weighted mean using `weights` from `config.yaml`. Scoring grades **information, not transcription form** — surface differences (punctuation, case, accents, abbreviation, OCR noise) must not read as wrong (see §9.5.1).
 
 | Component | Metric |
 |---|---|
 | `schema_validity` | fraction of `Document` fields that pydantic-validate (partial credit per field) |
 | `article_count` | `1 - |n_pred − n_truth| / max(n_pred, n_truth)` |
-| `metadata` | mean of per-field exact-match indicators across editor/issue/publisher/cost |
-| `titles` | mean title similarity over Hungarian-aligned articles |
-| `text` | mean text similarity over Hungarian-aligned articles (sentence embeddings, e.g. `nomic-embed-text`) |
+| `metadata` | mean of per-field **graded** scores: form-insensitive fuzzy similarity for text fields (editor/publisher), parsed comparison for date (full/month/year tiers), int-coerced exact for volume/number. Fields at/above `judge.bands.metadata` snap to full credit. |
+| `titles` | mean title similarity over aligned articles; pairs at/above `judge.bands.title` snap to full credit |
+| `text` | mean text similarity over aligned articles (sentence embeddings, e.g. `nomic-embed-text`; token-Jaccard fallback) |
 | `order` | order score after Hungarian alignment (§9.4) |
 | `pages` | mean Jaccard over `pages` arrays of aligned articles |
+
+Article alignment (§9.4) uses a `judge.alignment_floor`: predicted↔truth pairs below it are *not* matched, so a genuinely missing/extra article is not force-paired with an unrelated one (which would otherwise corrupt titles/text/pages and hide the count error).
 
 The aggregate is the user's primary signal. Component scores diagnose *what* went wrong.
 
@@ -388,9 +390,15 @@ The judge must not transmit ground-truth content to the agent.
 - Length-revealing hints beyond bucketed ranges ("~40% shorter than expected" allowed; "should be 312 words" not).
 - Triangulating hints ("editor's last name starts with B").
 
-LLM-generated hints pass through a deterministic post-filter that checks for substring overlap with ground truth above `leakage.hint_overlap_filter_threshold` and redacts/regenerates if found. Filter is the safety net; the judge's prompt is the first line of defense.
+Hints (both the deterministic broad-mode per-component hints and LLM marking feedback) pass through a deterministic post-filter that checks for substring overlap with ground truth above `leakage.hint_overlap_filter_threshold` and redacts if found. Filter is the safety net; the judge's prompt and the templated hints are the first line of defense.
 
 This is non-adversarial. Per-field numeric scores leak information bit-by-bit over many rounds; acceptable for the use case.
+
+#### 9.5.1 Essence over form, and per-component hints
+
+There is no single canonical transcription, so the judge must not punish format choices. Deterministically (broad) and via the LLM rubric (marking), it ignores punctuation, case, accents, abbreviation vs spelled-out forms, OCR-style character noise, paragraph/line chunking, and reasonable segmentation/ordering — while still penalizing missing/truncated content, wrong values, and verse-as-prose.
+
+Every imperfect broad-mode component emits a **non-prescriptive hint**: it names *where/what kind* of problem to investigate (schema field, predicted article index, "metadata field close but not matching — likely abbreviation/OCR/truncation", "page numbers consistently offset — check folio vs PDF-index convention") and may cite numeric scores, but never the truth content and never the corrected value. The harness surfaces these hints in the next round's developer-agent prompt so the agent improves the *process*, not a specific answer.
 
 ### 9.6 Output schemas
 
@@ -416,13 +424,14 @@ Broad mode:
     {"category": "verse_misformatted_as_prose", "predicted_index": 7}
   ],
   "hints": [
-    "One article on page 1 is missing.",
-    "Predicted article #7 appears to be verse but was emitted as prose paragraphs."
+    "You produced 1 fewer article(s) than expected. Investigate dropped or merged items: letters/columns folded together, short notices skipped, or a continuation absorbed into the wrong article.",
+    "Metadata 'publisher.address' is close but not matching — likely abbreviation, OCR character errors, or truncation. Re-examine the source region.",
+    "Predicted article #7 appears to be verse but was emitted as prose."
   ]
 }
 ```
 
-Marking mode (freeform, LLM-driven — qualitative not numeric):
+Marking mode (freeform, LLM-driven — qualitative, essence-over-form; verdict ∈ `equivalent`/`minor_format_diff`/`partially_present`/`materially_different`/`missing`/`unverifiable`):
 
 ```json
 {
@@ -430,8 +439,8 @@ Marking mode (freeform, LLM-driven — qualitative not numeric):
   "pdf_id": "issue_1892_06_03",
   "question": "Is article 4's body materially incomplete?",
   "focus_path": "articles[4].text",
-  "verdict": "incomplete",
-  "feedback": "The predicted body is materially shorter than truth; looks truncated near the end.",
+  "verdict": "partially_present",
+  "feedback": "The predicted body is materially shorter than expected; looks truncated near the end.",
   "suggested_focus_path": "articles[4].text"
 }
 ```

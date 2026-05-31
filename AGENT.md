@@ -49,7 +49,7 @@ The harness (`scripts/run_validation.py`) owns the round loop. Each round:
 
 1. The harness runs `pdf_to_json` over the val set and submits broad eval to the judge.
 2. The harness commits the new `trends/round_history.json` entry.
-3. The harness invokes you (`claude --print`) with a brief that includes the round-N broad feedback.
+3. The harness invokes you (`claude --print`) with a brief that includes the round-N broad feedback — component scores **and per-component hints** that point at what/where to investigate (never the fix). Treat the hints as your primary to-do list for the round.
 4. You investigate, optionally probe the judge in marking mode, edit code, commit, and exit.
 5. The harness starts round N+1.
 
@@ -102,13 +102,13 @@ The judge runs in a separate container. Communicate via the filesystem:
 
 ```json
 {
-  "verdict": "correct" | "incomplete" | "wrong" | "unverifiable",
-  "feedback": "≤80 words, JSON-relative guidance with no quoted truth",
+  "verdict": "equivalent" | "minor_format_diff" | "partially_present" | "materially_different" | "missing" | "unverifiable",
+  "feedback": "≤80 words, JSON-relative guidance, no quoted truth, no corrected value",
   "suggested_focus_path": "articles[4].text" | null
 }
 ```
 
-The judge sees only your predicted JSON and the truth JSON — **not the PDF**. Feedback is JSON-relative ("the body is materially shorter than truth", "this should be verse not prose", "publisher address looks truncated"), never layout-relative ("look at the right column"). If you need layout reasoning, do it in the translator side by re-rendering the page yourself.
+The judge grades **essence, not form**. It will not mark you down for punctuation, capitalization, abbreviation, OCR-style character noise, paragraph/line chunking, or reasonable segmentation/ordering choices — those return `equivalent`/`minor_format_diff`. It *will* flag missing or truncated content, wrong values, and verse-as-prose (`partially_present`/`materially_different`/`missing`). The judge sees only your predicted JSON and the truth JSON — **not the PDF**. Feedback is JSON-relative ("the body is materially shorter than expected", "this should be verse not prose", "publisher address looks truncated"), never layout-relative ("look at the right column") and never the corrected value. If you need layout reasoning, do it in the translator by re-rendering the page yourself.
 
 ## Stop signals
 
