@@ -66,13 +66,25 @@ def _doctl_try(*args: str) -> tuple[int, str, str]:
 
 def _list_or_string(value, fallbacks_key: str | None, do: dict) -> list[str]:
     """Coerce a config value (string or list) plus optional fallbacks list
-    into a single ordered list of strings."""
+    into a single ordered, de-duplicated list of strings.
+
+    Fallbacks are appended whether the primary value is a scalar or a list, so
+    `region: [nyc2]` + `region_fallbacks: [ams3]` works the same as the scalar
+    form.
+    """
     if isinstance(value, list):
-        return [str(x) for x in value if x]
-    out = [str(value)] if value else []
+        out = [str(x) for x in value if x]
+    else:
+        out = [str(value)] if value else []
     if fallbacks_key:
         out.extend(str(x) for x in (do.get(fallbacks_key) or []) if x)
-    return out
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            deduped.append(x)
+    return deduped
 
 
 def _regions(do: dict) -> list[str]:
