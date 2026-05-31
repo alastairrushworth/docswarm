@@ -5,21 +5,34 @@ repo:
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  # gpu-h200x1-141gb is offered ONLY in nyc2; gpu-h100x1-80gb ONLY in ams3.
-  # The snapshot (226981253) has been transferred to BOTH nyc2 and ams3, so a
-  # cross-region fallback now works. The launcher tries every (size, region)
-  # pair — sizes outer, regions inner — skipping combinations that 422 with
-  # "not available in this region":
-  #   1. H200 @ nyc2  (primary; H200's only region)
-  #   2. H200 @ ams3  -> 422, skipped
-  #   3. H100 @ nyc2  -> 422, skipped
-  #   4. H100 @ ams3  (fallback when nyc2 H200 capacity is exhausted)
-  # H100 is 80GB vs H200 141GB, but the loadout is a single resident
-  # qwen3.6:35b (~24GB, shared by coder/vision/judge) + nomic-embed, so it fits.
+  # DO does not expose per-region GPU availability via any list API (GPU SKUs
+  # are omitted from `region list`.sizes and `size list`.regions), so the ONLY
+  # way to find an available card is to attempt creation. The launcher sweeps
+  # every (size, region) pair — sizes outer, regions inner — skipping any that
+  # 422 with "not available in this region" (same message whether the SKU is
+  # capacity-exhausted OR simply not offered there).
+  #
+  # H100/H200 were unavailable in nyc2+ams3, so the region list below is WIDE:
+  # the build (`make snapshot`, snapshot_size below) sweeps all regions to find
+  # any region with an available L40S/6000 Ada. The snapshot lands in whichever
+  # region wins; after that, prune `region`/`region_fallbacks` to that region
+  # (the new ~500GB snapshot only exists where it was built unless transferred).
   region:
     - "nyc2"
   region_fallbacks:
+    - "tor1"
+    - "atl1"
+    - "nyc1"
+    - "nyc3"
+    - "sfo3"
+    - "sfo2"
+    - "fra1"
+    - "lon1"
     - "ams3"
+    - "blr1"
+    - "syd1"
+    - "sgp1"
+    - "ric1"
   size:
     - "gpu-h200x1-141gb"
   size_fallbacks:
