@@ -483,4 +483,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Ensure print() output appears before subprocess output when stdout is piped.
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     sys.exit(main())

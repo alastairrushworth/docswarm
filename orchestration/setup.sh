@@ -12,6 +12,7 @@ log() { echo ">>> $*"; }
 # 1. Ollama (zstd required by the installer on Ubuntu 22.04)
 if ! command -v ollama >/dev/null 2>&1; then
     log "installing ollama"
+    DEBIAN_FRONTEND=noninteractive apt-get update -q
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q zstd
     curl -fsSL https://ollama.ai/install.sh | sh
 fi
