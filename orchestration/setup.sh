@@ -1,75 +1,39 @@
 #!/usr/bin/env bash
-# Idempotent: re-running on a partially-set-up droplet must succeed.
+# One-time setup on a fresh RunPod pod.
+# Installs Ollama, Node.js + Claude Code, and Python packages natively
+# (no Docker), then clones the repo to /workspace (network volume).
+# Idempotent: re-running on a partially-set-up pod succeeds.
 # Inputs:
-#   $REPO_URL, $REPO_BRANCH       env vars
-#   "$@"                          Ollama model tags to pre-pull
+#   $REPO_URL, $REPO_BRANCH   env vars
 set -euo pipefail
 
 log() { echo ">>> $*"; }
 
-# apt on a freshly-booted DO droplet may collide with cloud-init's own apt
-# runs. Wait up to 5 min for the dpkg/apt lock before failing.
-APT="apt-get -o DPkg::Lock::Timeout=300"
-
-# 1. Docker (engine + buildx + compose plugin).
-# Some DO base images (e.g. gpu-h100x1-base) ship docker-ce alone, so we
-# explicitly install the compose plugin whether or not docker is present.
-if ! command -v docker >/dev/null 2>&1; then
-    log "installing docker"
-    curl -fsSL https://get.docker.com | sh
-fi
-if ! docker compose version >/dev/null 2>&1; then
-    log "installing docker compose plugin (standalone binary)"
-    install -d /usr/libexec/docker/cli-plugins
-    arch="$(uname -m)"
-    curl -fsSL \
-        "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${arch}" \
-        -o /usr/libexec/docker/cli-plugins/docker-compose
-    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
-fi
-
-# 2. NVIDIA Container Toolkit
-if ! dpkg -l 2>/dev/null | grep -q nvidia-container-toolkit; then
-    log "installing nvidia container toolkit"
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    $APT update
-    $APT install -y nvidia-container-toolkit
-    nvidia-ctk runtime configure --runtime=docker
-    systemctl restart docker
-fi
-
-# 3. Ollama
+# 1. Ollama (zstd required by the installer on Ubuntu 22.04)
 if ! command -v ollama >/dev/null 2>&1; then
     log "installing ollama"
-    curl -fsSL https://ollama.com/install.sh | sh
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q zstd
+    curl -fsSL https://ollama.ai/install.sh | sh
 fi
-systemctl enable --now ollama
-# wait for ollama to be ready
-for _ in $(seq 1 30); do
-    ollama list >/dev/null 2>&1 && break
-    sleep 2
-done
 
-# 4. Pull models passed as args (dedup; coder/vision/judge often the same tag)
-declare -A seen
-for model in "$@"; do
-    if [[ -z "${seen[$model]:-}" ]]; then
-        log "pulling $model"
-        ollama pull "$model"
-        seen[$model]=1
-    fi
-done
+# 2. Node.js 20 + Claude Code (developer-agent uses claude CLI)
+if ! command -v node >/dev/null 2>&1; then
+    log "installing node.js 20"
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs
+fi
+if ! command -v claude >/dev/null 2>&1; then
+    log "installing claude code"
+    npm install -g @anthropic-ai/claude-code
+fi
 
-# 5. Pre-pull base docker images so first `make run` doesn't download them
-log "pre-pulling docker base images"
-docker pull ollama/ollama:latest >/dev/null
-docker pull python:3.11-slim >/dev/null
+# 3. Python packages (runpod/pytorch already has numpy/scipy/torch/cuda)
+log "installing python packages"
+pip install --quiet --upgrade \
+    "pydantic>=2.6" "pyyaml>=6.0" "pymupdf>=1.24" \
+    "Pillow>=10.0" "httpx>=0.27" "numpy>=1.26" "scipy>=1.11" "pytest>=8.0"
 
-# 6. SSH config for GitHub (deploy key already at /root/.ssh/id_ed25519)
+# 4. SSH config for GitHub (deploy key already at /root/.ssh/id_ed25519)
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 if [[ -f /root/.ssh/id_ed25519 ]]; then
@@ -78,21 +42,22 @@ fi
 ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null || true
 sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts
 
-# 7. Clone repo to /workspace (idempotent)
-if [[ ! -d /workspace/.git ]]; then
-    log "cloning $REPO_URL ($REPO_BRANCH) → /workspace"
-    git clone -b "$REPO_BRANCH" "$REPO_URL" /workspace
-else
+# 5. Clone repo to /workspace (idempotent)
+if [[ -d /workspace/.git ]]; then
     log "/workspace already a git repo; fetching latest"
     git -C /workspace fetch origin
     git -C /workspace checkout "$REPO_BRANCH"
     git -C /workspace pull --ff-only
+else
+    log "cloning $REPO_URL ($REPO_BRANCH) → /workspace"
+    # git clone refuses a non-empty target; init+fetch handles that case too
+    git init /workspace
+    git -C /workspace remote add origin "$REPO_URL"
+    git -C /workspace fetch origin
+    git -C /workspace checkout -B "$REPO_BRANCH" "origin/$REPO_BRANCH"
 fi
 
-# 8. Stage deploy key for the developer-agent container.
-# `secrets/` is gitignored, so the cloned /workspace has no secrets/ dir.
-# docker-compose mounts ./secrets:/secrets:ro — without this step, the agent
-# container has no key and `git push` from inside silently fails.
+# 6. Stage deploy key for git push inside the agent
 log "staging deploy key at /workspace/secrets/deploy_key"
 mkdir -p /workspace/secrets
 cp /root/.ssh/id_ed25519 /workspace/secrets/deploy_key

@@ -11,13 +11,18 @@ from typing import Any
 
 import httpx
 
+import os
+
 from .config import get
 
 logger = logging.getLogger("judge.llm")
 
 
 def _ollama_url() -> str:
-    return str(get("ollama.url", "http://ollama-main:11434")).rstrip("/")
+    env = os.environ.get("OLLAMA_URL", "")
+    if env:
+        return env.rstrip("/")
+    return str(get("ollama.url", "http://localhost:11434")).rstrip("/")
 
 
 def chat(

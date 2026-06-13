@@ -1,38 +1,43 @@
-"""Single-command launcher for a remote H200 iteration run.
+"""Single-command launcher for a remote RunPod GPU run.
 
-Drives `doctl` from your local terminal:
+Drives RunPod's REST API from your local terminal:
   1. Push the current branch to origin.
-  2. `doctl compute droplet create` from the snapshot in config.yaml.
-  3. SSH to the droplet, `git pull`, `docker compose up --build`.
-  4. Stream stdout/stderr back to the local terminal.
-  5. Tear the droplet down on exit (success, error, or Ctrl-C).
+  2. POST /v1/pods to create a GPU pod from config.yaml.
+  3. Poll until the pod has a public IP and SSH is reachable.
+  4. SSH to the pod, `git pull`, `docker compose up --build`.
+  5. Stream stdout/stderr back to the local terminal.
+  6. Tear the pod down on exit (success, error, or Ctrl-C).
 
 Usage:
-    python orchestration/launch.py up        # full provision → run → teardown
-    python orchestration/launch.py down      # teardown a droplet whose ID we recorded
-    python orchestration/launch.py snapshot  # walks you through snapshot creation
+    python orchestration/launch.py up      # provision → run → teardown
+    python orchestration/launch.py down    # teardown a pod whose ID was recorded
+    python orchestration/launch.py setup   # one-time: create network volume + install deps
 
-Requires: `doctl` authenticated locally (`doctl auth init`), a configured
-deploy SSH key (id in `digitalocean.ssh_key_id`), and a snapshot with Docker,
-NVIDIA toolkit, Ollama and the model weights pre-pulled.
+Requires:
+    RUNPOD_API_KEY env var  (https://www.runpod.io/console/user/settings)
+    secrets/deploy_key      SSH private key (also used as GitHub deploy key)
+    secrets/deploy_key.pub  corresponding public key
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
+import re
 import signal
 import subprocess
 import sys
 import time
+import ssl
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-DROPLET_FILE = ROOT / ".droplet_id"
-IP_FILE = ROOT / ".droplet_ip"
+POD_FILE = ROOT / ".pod_id"
+BASE_URL = "https://rest.runpod.io/v1"
 
 
 def _cfg() -> dict:
@@ -40,162 +45,179 @@ def _cfg() -> dict:
         return yaml.safe_load(f)
 
 
-def _require_doctl() -> None:
-    if shutil.which("doctl") is None:
-        sys.exit("doctl not found on PATH. Install: https://docs.digitalocean.com/reference/doctl/")
-
-
-def _doctl(*args: str, capture: bool = False) -> str:
-    if capture:
-        r = subprocess.run(["doctl", *args], capture_output=True, text=True)
-        if r.returncode != 0:
-            sys.exit(f"doctl {' '.join(args)} failed:\n{r.stderr.strip() or r.stdout.strip()}")
-        return r.stdout.strip()
-    r = subprocess.run(["doctl", *args])
-    if r.returncode != 0:
-        sys.exit(f"doctl {' '.join(args)} exited {r.returncode}")
-    return ""
-
-
-def _doctl_try(*args: str) -> tuple[int, str, str]:
-    """Like _doctl(capture=True) but returns (rc, stdout, stderr) instead of
-    sys.exit'ing on failure. Caller decides how to recover."""
-    r = subprocess.run(["doctl", *args], capture_output=True, text=True)
-    return r.returncode, r.stdout.strip(), r.stderr.strip()
-
-
-def _list_or_string(value, fallbacks_key: str | None, do: dict) -> list[str]:
-    """Coerce a config value (string or list) plus optional fallbacks list
-    into a single ordered, de-duplicated list of strings.
-
-    Fallbacks are appended whether the primary value is a scalar or a list, so
-    `region: [nyc2]` + `region_fallbacks: [ams3]` works the same as the scalar
-    form.
-    """
-    if isinstance(value, list):
-        out = [str(x) for x in value if x]
-    else:
-        out = [str(value)] if value else []
-    if fallbacks_key:
-        out.extend(str(x) for x in (do.get(fallbacks_key) or []) if x)
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            deduped.append(x)
-    return deduped
-
-
-def _regions(do: dict) -> list[str]:
-    return _list_or_string(do.get("region"), "region_fallbacks", do)
-
-
-def _sizes(do: dict, key: str = "size") -> list[str]:
-    return _list_or_string(do.get(key), f"{key}_fallbacks", do)
-
-
-def _create_droplet_with_fallback(
-    *,
-    name: str,
-    sizes: list[str],
-    image: str,
-    ssh_key_id: str,
-    regions: list[str],
-    tag: str,
-) -> dict:
-    """Try `doctl droplet create` across (size, region) combinations until
-    one succeeds. Sizes are the outer loop, regions the inner — so we exhaust
-    H200 across all regions before falling back to H100, etc.
-
-    Falls through only on the 422 "Size is not available in this region"
-    error. Any other doctl failure is fatal.
-    Returns the parsed droplet JSON object.
-    """
-    attempts = [(s, r) for s in sizes for r in regions]
-    total = len(attempts)
-    for i, (size, region) in enumerate(attempts):
-        print(f">>> creating droplet {name} ({size}, region={region}) [{i+1}/{total}]")
-        rc, stdout, stderr = _doctl_try(
-            "compute", "droplet", "create", name,
-            "--region", region,
-            "--size", size,
-            "--image", image,
-            "--ssh-keys", ssh_key_id,
-            "--tag-names", tag,
-            "--wait",
-            "--output", "json",
+def _api_key() -> str:
+    key = os.environ.get("RUNPOD_API_KEY", "")
+    if not key:
+        env_file = ROOT / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("RUNPOD_API_KEY="):
+                    key = line.split("=", 1)[1].strip()
+                    break
+    if not key:
+        sys.exit(
+            "RUNPOD_API_KEY not found in environment or .env\n"
+            "Get your key at https://www.runpod.io/console/user/settings"
         )
-        if rc == 0:
-            droplets = json.loads(stdout)
-            return droplets[0] if isinstance(droplets, list) else droplets
-        msg = (stderr or stdout).lower()
-        if "not available in this region" in msg and i < total - 1:
-            print(f"    {size}@{region}: unavailable; trying next combination")
-            continue
-        sys.exit(f"droplet create failed:\n{stderr or stdout}")
-    sys.exit(f"none of {sizes} available in any of {regions}")
+    return key
+
+
+# Datacenters tried in order when datacenter_id is not set or has no capacity.
+# List is all datacenters that support network volumes, US-first.
+_DC_FALLBACKS = [
+    "US-TX-3", "US-KS-2", "US-GA-2", "US-CA-2", "US-NC-1", "US-NC-2",
+    "US-IL-1", "US-MD-1", "US-MO-1", "US-MO-2", "US-NE-1", "US-WA-1",
+    "EU-RO-1", "EU-NL-1", "EU-SE-1", "EU-CZ-1", "EU-FR-1",
+    "EUR-IS-1", "EUR-IS-3", "EUR-IS-4", "EUR-NO-1", "EUR-NO-2",
+    "CA-MTL-3", "CA-MTL-4", "US-GA-2", "AP-JP-1",
+]
+
+_NO_CAPACITY_PHRASES = ("no instances currently available", "could not find any pods")
+
+
+def _ssl_ctx() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except ImportError:
+        pass
+    return ctx
+
+
+def _api(method: str, path: str, body: dict | None = None) -> dict:
+    url = f"{BASE_URL}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {_api_key()}")
+    if data:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, context=_ssl_ctx()) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode(errors="replace")
+        sys.exit(f"RunPod API {method} {path} failed ({e.code}): {msg}")
+
+
+def _ssh_pubkey() -> str:
+    pub = ROOT / "secrets/deploy_key.pub"
+    if not pub.is_file():
+        sys.exit(
+            f"SSH public key not found at {pub}\n"
+            "Generate with: ssh-keygen -t ed25519 -f secrets/deploy_key -N ''"
+        )
+    return pub.read_text().strip()
+
+
+def _create_pod(cfg: dict, volume_id: str | None = None) -> dict:
+    rp = cfg["runpod"]
+    body: dict = {
+        "name": rp.get("pod_name", "docswarm"),
+        "imageName": rp["image"],
+        "gpuTypeIds": rp["gpu_type_ids"],
+        "gpuCount": 1,
+        "containerDiskInGb": rp.get("container_disk_gb", 50),
+        "cloudType": "SECURE",
+        "ports": ["22/tcp"],
+        "env": {"PUBLIC_KEY": _ssh_pubkey()},
+    }
+    vid = volume_id or rp.get("network_volume_id", "")
+    if vid:
+        body["networkVolumeId"] = vid
+    dc_id = rp.get("datacenter_id", "")
+    if dc_id:
+        body["dataCenterIds"] = [dc_id]
+    print(f">>> creating RunPod pod (GPUs: {rp['gpu_type_ids']})")
+    pod = _api("POST", "/pods", body)
+    print(f">>> pod {pod['id']} created")
+    POD_FILE.write_text(pod["id"])
+    return pod
+
+
+def _get_ssh_port(pod: dict) -> str | None:
+    mappings = pod.get("portMappings") or {}
+    for key in ("22", "22/tcp"):
+        if key in mappings:
+            return str(mappings[key])
+    return None
+
+
+def _wait_for_pod(pod_id: str, timeout: float = 300.0) -> dict:
+    print(f">>> waiting for pod {pod_id} to become ready")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        pod = _api("GET", f"/pods/{pod_id}")
+        if pod.get("desiredStatus") == "RUNNING" and pod.get("publicIp") and _get_ssh_port(pod):
+            return pod
+        time.sleep(5)
+    sys.exit(f"pod {pod_id} never became ready within {timeout:.0f}s")
+
+
+def _delete_pod(pod_id: str | None) -> None:
+    if not pod_id:
+        return
+    try:
+        print(f">>> destroying pod {pod_id}")
+        _api("DELETE", f"/pods/{pod_id}")
+    except SystemExit:
+        pass
+    finally:
+        POD_FILE.unlink(missing_ok=True)
+
+
+def _ssh_flags(ip: str, port: str) -> list[str]:
+    deploy_key = ROOT / "secrets/deploy_key"
+    return [
+        "-i", str(deploy_key),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "-p", port,
+    ]
+
+
+def _wait_for_ssh(ip: str, port: str, timeout: float = 600.0) -> None:
+    print(f">>> waiting for SSH at {ip}:{port}")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["ssh", *_ssh_flags(ip, port),
+             "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+             f"root@{ip}", "true"],
+            capture_output=True,
+        )
+        if r.returncode == 0:
+            return
+        time.sleep(5)
+    sys.exit(f"SSH at {ip}:{port} never came up within {timeout:.0f}s")
+
+
+def _ssh_run(ip: str, port: str, cmd: str) -> int:
+    return subprocess.run(
+        ["ssh", "-t", *_ssh_flags(ip, port), f"root@{ip}", cmd],
+        cwd=ROOT,
+    ).returncode
+
+
+def _scp(local: Path, ip: str, port: str, remote: str) -> None:
+    deploy_key = ROOT / "secrets/deploy_key"
+    subprocess.run(
+        ["scp", "-i", str(deploy_key),
+         "-o", "StrictHostKeyChecking=accept-new",
+         "-o", "BatchMode=yes",
+         "-P", port, str(local), f"root@{ip}:{remote}"],
+        check=True,
+    )
 
 
 def _git_branch() -> str:
-    r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ROOT,
-                       check=True, capture_output=True, text=True)
-    return r.stdout.strip()
-
-
-def _create_droplet(cfg: dict) -> tuple[str, str]:
-    do = cfg["digitalocean"]
-    snapshot = do.get("snapshot_id", "")
-    if not snapshot:
-        sys.exit("config.digitalocean.snapshot_id is empty; run `make build-snapshot` first")
-    ssh_key_id = do.get("ssh_key_id", "")
-    if not ssh_key_id:
-        sys.exit("config.digitalocean.ssh_key_id is empty; `doctl compute ssh-key list`")
-    name = do.get("droplet_name", "docswarm-h200")
-    regions = _regions(do)
-    if not regions:
-        sys.exit("config.digitalocean.region is empty")
-
-    sizes = _sizes(do)
-    if not sizes:
-        sys.exit("config.digitalocean.size is empty")
-    droplet = _create_droplet_with_fallback(
-        name=name,
-        sizes=sizes,
-        image=str(snapshot),
-        ssh_key_id=str(ssh_key_id),
-        regions=regions,
-        tag="docswarm",
+    r = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
     )
-    droplet_id = str(droplet["id"])
-    DROPLET_FILE.write_text(droplet_id)
-
-    ip = ""
-    for n in droplet.get("networks", {}).get("v4", []):
-        if n.get("type") == "public":
-            ip = n.get("ip_address", "")
-            break
-    if not ip:
-        # `--wait` should have populated networks; poll if not.
-        ip = _wait_for_ip(droplet_id)
-    IP_FILE.write_text(ip)
-    print(f">>> droplet {droplet_id} active at {ip}")
-    return droplet_id, ip
-
-
-def _wait_for_ip(droplet_id: str, timeout: float = 300.0) -> str:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        out = _doctl("compute", "droplet", "get", droplet_id,
-                     "--output", "json", capture=True)
-        d = json.loads(out)
-        if isinstance(d, list):
-            d = d[0]
-        for n in d.get("networks", {}).get("v4", []):
-            if n.get("type") == "public":
-                return n["ip_address"]
-        time.sleep(5)
-    sys.exit(f"droplet {droplet_id} never reported a public IP")
+    return r.stdout.strip()
 
 
 def _push_branch(branch: str) -> None:
@@ -203,246 +225,261 @@ def _push_branch(branch: str) -> None:
     subprocess.run(["git", "push", "origin", branch], cwd=ROOT, check=True)
 
 
-def _ssh_run(ip: str, cmd: str) -> int:
-    full = [
-        "ssh", "-t",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ServerAliveInterval=30",
-        f"root@{ip}", cmd,
-    ]
-    return subprocess.run(full, cwd=ROOT).returncode
-
-
-def _wait_for_ssh(ip: str, timeout: float = 300.0) -> None:
-    """Poll until sshd is accepting connections."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["ssh", "-o", "StrictHostKeyChecking=accept-new",
-             "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-             f"root@{ip}", "true"],
-            capture_output=True, text=True,
-        )
-        if r.returncode == 0:
-            return
-        time.sleep(5)
-    sys.exit(f"sshd at {ip} never came up within {timeout:.0f}s")
-
-
-def _scp(local: Path, ip: str, remote: str) -> None:
-    subprocess.run(
-        ["scp", "-o", "StrictHostKeyChecking=accept-new",
-         str(local), f"root@{ip}:{remote}"],
-        check=True,
-    )
-
-
-def _patch_snapshot_id(snapshot_id: str) -> None:
-    """In-place edit of config.yaml's digitalocean.snapshot_id, preserving
-    formatting and comments."""
+def _patch_config(volume_id: str, dc_id: str) -> None:
     cfg_path = ROOT / "config.yaml"
     text = cfg_path.read_text()
-    import re
-    new_text, n = re.subn(
-        r'(snapshot_id:\s*)"[^"]*"',
-        f'\\1"{snapshot_id}"',
-        text,
-        count=1,
+    text, n1 = re.subn(
+        r'(network_volume_id:\s*)"[^"]*"',
+        f'\\1"{volume_id}"',
+        text, count=1,
     )
-    if n != 1:
-        sys.exit("could not locate snapshot_id line in config.yaml")
-    cfg_path.write_text(new_text)
-
-
-def _destroy(droplet_id: str | None) -> None:
-    if not droplet_id:
-        return
-    try:
-        print(f">>> destroying droplet {droplet_id}")
-        subprocess.run(
-            ["doctl", "compute", "droplet", "delete", droplet_id, "-f"],
-            check=False,
-        )
-    finally:
-        DROPLET_FILE.unlink(missing_ok=True)
-        IP_FILE.unlink(missing_ok=True)
+    text, n2 = re.subn(
+        r'(datacenter_id:\s*)"[^"]*"',
+        f'\\1"{dc_id}"',
+        text, count=1,
+    )
+    if n1 != 1 or n2 != 1:
+        sys.exit("could not patch network_volume_id / datacenter_id in config.yaml")
+    cfg_path.write_text(text)
 
 
 def up() -> int:
-    _require_doctl()
     cfg = _cfg()
+    if not cfg["runpod"].get("network_volume_id"):
+        sys.exit("config.runpod.network_volume_id is empty — run `make setup` first")
+
     branch = _git_branch()
     _push_branch(branch)
 
-    droplet_id, ip = _create_droplet(cfg)
+    pod = _create_pod(cfg)
+    pod_id = pod["id"]
 
     def _on_signal(signum, frame):  # noqa: ARG001
         print(f"\n>>> received signal {signum}; tearing down")
-        _destroy(droplet_id)
+        _delete_pod(pod_id)
         sys.exit(130)
 
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    print(">>> waiting for sshd")
-    _wait_for_ssh(ip)
+    pod = _wait_for_pod(pod_id)
+    ip = pod["publicIp"]
+    port = _get_ssh_port(pod)
+    print(f">>> pod ready at {ip}:{port}")
+
+    _wait_for_ssh(ip, port)
 
     try:
-        # Standalone compose plugin URL (no apt repo dance, ~10MB binary).
-        compose_url = (
-            "https://github.com/docker/compose/releases/latest/download/"
-            "docker-compose-linux-$(uname -m)"
-        )
-        remote_cmd = (
+        ollama_cfg = cfg.get("ollama", {})
+        models_cfg = cfg.get("models", {})
+
+        # Pull latest code and restore SSH keys for git push inside the agent.
+        sync_cmd = (
             f"set -e; cd /workspace && "
             f"git fetch origin && git checkout {branch} && git pull --ff-only && "
-            # Heal snapshots that were built before setup.sh installed the
-            # compose plugin. Idempotent (~1s) when already present.
-            f"(docker compose version >/dev/null 2>&1 || "
-            f"  (install -d /usr/libexec/docker/cli-plugins && "
-            f'   curl -fsSL "{compose_url}" -o /usr/libexec/docker/cli-plugins/docker-compose && '
-            f"   chmod +x /usr/libexec/docker/cli-plugins/docker-compose)) && "
-            # Heal snapshots built before setup.sh staged the deploy key.
-            f"(test -f /workspace/secrets/deploy_key || "
-            f"  (mkdir -p /workspace/secrets && cp /root/.ssh/id_ed25519 /workspace/secrets/deploy_key && "
-            f"   chmod 600 /workspace/secrets/deploy_key)) && "
-            f"docker compose up --build --exit-code-from developer-agent"
+            f"mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+            f"cp /workspace/secrets/deploy_key /root/.ssh/id_ed25519 && "
+            f"chmod 600 /root/.ssh/id_ed25519 && "
+            f"ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null; true"
         )
-        rc = _ssh_run(ip, remote_cmd)
+        print(">>> syncing code and SSH keys")
+        rc = _ssh_run(ip, port, sync_cmd)
+        if rc != 0:
+            return rc
+
+        coder_model = models_cfg.get("coder", "qwen3.6:35b")
+        embed_model = models_cfg.get("embedding", "nomic-embed-text")
+        ollama_env = (
+            f"OLLAMA_NUM_PARALLEL={ollama_cfg.get('num_parallel', 4)} "
+            f"OLLAMA_MAX_LOADED_MODELS={ollama_cfg.get('max_loaded_models', 2)} "
+            f"OLLAMA_KEEP_ALIVE={ollama_cfg.get('keep_alive', '24h')} "
+            f"OLLAMA_CONTEXT_LENGTH={ollama_cfg.get('context_length', 65536)}"
+        )
+
+        # Start Ollama + judge in background, run developer-agent in foreground.
+        # Model weights persist on /workspace/ollama-data between runs.
+        run_cmd = (
+            "set -e; cd /workspace; "
+            f"OLLAMA_MODELS=/workspace/ollama-data {ollama_env} "
+            "nohup ollama serve >/var/log/ollama.log 2>&1 & "
+            "echo '>>> waiting for ollama'; "
+            "for i in $(seq 1 120); do "
+            "  curl -sf http://localhost:11434/api/version >/dev/null 2>&1 && break; "
+            "  sleep 2; "
+            "done; "
+            "curl -sf http://localhost:11434/api/version >/dev/null 2>&1 || "
+            "  { echo 'ERROR: ollama failed to start'; cat /var/log/ollama.log; exit 1; }; "
+            f"echo '>>> pulling models (skipped if already cached)'; "
+            f"ollama pull {coder_model}; "
+            f"ollama pull {embed_model}; "
+            "echo '>>> starting judge'; "
+            "DOCSWARM_CONFIG=/workspace/config.yaml "
+            "OLLAMA_URL=http://localhost:11434 "
+            "PYTHONPATH=/workspace "
+            "nohup python -m judge.judge >/var/log/judge.log 2>&1 & "
+            "echo '>>> starting developer-agent'; "
+            "DOCSWARM_CONFIG=/workspace/config.yaml "
+            "OLLAMA_URL=http://localhost:11434 "
+            "ANTHROPIC_BASE_URL=http://localhost:11434 "
+            "ANTHROPIC_AUTH_TOKEN=ollama "
+            "ANTHROPIC_API_KEY= "
+            "PYTHONPATH=/workspace:/workspace/module "
+            "python scripts/run_validation.py"
+        )
+        rc = _ssh_run(ip, port, run_cmd)
         return rc
     finally:
-        _destroy(droplet_id)
+        _delete_pod(pod_id)
 
 
 def down() -> int:
-    _require_doctl()
-    if not DROPLET_FILE.is_file():
-        print(">>> no droplet on record")
+    if not POD_FILE.is_file():
+        print(">>> no pod on record")
         return 0
-    droplet_id = DROPLET_FILE.read_text().strip()
-    _destroy(droplet_id)
+    pod_id = POD_FILE.read_text().strip()
+    _delete_pod(pod_id)
     return 0
 
 
-def snapshot() -> int:
-    """Automated one-shot snapshot build:
+def setup() -> int:
+    """One-time setup:
+      1. Create a persistent network volume (stores /workspace across all pod runs).
+      2. Spin up a GPU pod with the volume attached.
+      3. SSH in, run setup.sh: install Docker + NVIDIA toolkit, clone repo, stage deploy key.
+      4. Destroy the pod — volume and its contents persist for all future `up` runs.
+      5. Write the volume ID back to config.yaml.
 
-      1. Spin up a setup droplet (cheap GPU SKU, GPU base image).
-      2. SCP deploy key + setup.sh.
-      3. Run setup.sh: install Docker / NVIDIA toolkit / Ollama, pull models,
-         clone the repo to /workspace.
-      4. Shut the droplet down (cleaner snapshots).
-      5. doctl droplet-action snapshot --wait.
-      6. Patch config.yaml with the new snapshot ID.
-      7. Destroy the setup droplet.
+    Ollama models are pulled on the first `up` run and cached on the volume.
     """
-    _require_doctl()
     cfg = _cfg()
-    do = cfg["digitalocean"]
+    rp = cfg["runpod"]
     repo = cfg["repo"]
-
-    ssh_key_id = do.get("ssh_key_id", "")
-    if not ssh_key_id:
-        sys.exit("config.digitalocean.ssh_key_id is empty; `doctl compute ssh-key list`")
 
     deploy_key = ROOT / "secrets/deploy_key"
     if not deploy_key.is_file():
         sys.exit(f"deploy key not found at {deploy_key} — see README")
-
     setup_script = ROOT / "orchestration/setup.sh"
     if not setup_script.is_file():
         sys.exit(f"setup script missing at {setup_script}")
 
-    sizes = _sizes(do, "snapshot_size") or _sizes(do)
-    if not sizes:
-        sys.exit("config.digitalocean.snapshot_size / size are both empty")
-    image = do.get("snapshot_image", "gpu-h100x1-base")
-    name = f"docswarm-snapshot-{int(time.time())}"
-    models = [v for v in cfg.get("models", {}).values() if v]
-    regions = _regions(do)
-    if not regions:
-        sys.exit("config.digitalocean.region is empty")
+    # Reuse an existing volume if setup was previously interrupted.
+    existing_vol = rp.get("network_volume_id", "")
+    if existing_vol:
+        existing_vols = _api("GET", "/networkvolumes")
+        match = next((v for v in existing_vols if v["id"] == existing_vol), None)
+        if match:
+            print(f">>> reusing existing volume {existing_vol} in {match['dataCenterId']}")
+            _patch_config(existing_vol, match["dataCenterId"])
+            cfg = _cfg()
+            rp = cfg["runpod"]
 
-    droplet = _create_droplet_with_fallback(
-        name=name,
-        sizes=sizes,
-        image=image,
-        ssh_key_id=str(ssh_key_id),
-        regions=regions,
-        tag="docswarm-setup",
-    )
-    droplet_id = str(droplet["id"])
+    dc_id = rp.get("datacenter_id", "")
+    candidates = [dc_id, *_DC_FALLBACKS] if dc_id else _DC_FALLBACKS
 
-    ip = ""
-    for n in droplet.get("networks", {}).get("v4", []):
-        if n.get("type") == "public":
-            ip = n.get("ip_address", "")
+    volume_size_gb = rp.get("volume_size_gb", 600)
+    volume_id = rp.get("network_volume_id", "")
+    chosen_dc = dc_id if volume_id else ""
+    pod_id = ""
+
+    if volume_id and chosen_dc:
+        # Volume already exists — skip straight to pod creation
+        print(f">>> creating pod with existing volume {volume_id}")
+        cfg["runpod"]["datacenter_id"] = chosen_dc
+        try:
+            pod = _create_pod(cfg, volume_id=volume_id)
+            pod_id = pod["id"]
+        except SystemExit as e:
+            sys.exit(f"Pod creation failed with existing volume: {e}")
+    else:
+        volume_id = ""
+        chosen_dc = ""
+
+    for dc in dict.fromkeys(candidates):  # deduplicate, preserve order
+        if volume_id:
+            break  # already handled above
+        print(f">>> trying datacenter {dc}")
+        try:
+            vol = _api("POST", "/networkvolumes", {
+                "name": "docswarm-workspace",
+                "size": volume_size_gb,
+                "dataCenterId": dc,
+            })
+        except SystemExit as e:
+            print(f"    {dc}: volume creation failed — {e}; skipping")
+            continue
+
+        vid = vol["id"]
+        print(f"    volume {vid} created; attempting pod")
+        cfg["runpod"]["datacenter_id"] = dc
+        try:
+            pod = _create_pod(cfg, volume_id=vid)
+            volume_id = vid
+            chosen_dc = dc
+            pod_id = pod["id"]
             break
-    if not ip:
-        ip = _wait_for_ip(droplet_id)
-    print(f">>> setup droplet {droplet_id} at {ip}; waiting for sshd")
-    _wait_for_ssh(ip)
+        except SystemExit as e:
+            err = str(e)
+            if any(p in err.lower() for p in _NO_CAPACITY_PHRASES):
+                print(f"    {dc}: no GPU capacity; cleaning up volume and trying next")
+                try:
+                    _api("DELETE", f"/networkvolumes/{vid}")
+                except SystemExit:
+                    pass
+                continue
+            # Non-capacity error — don't silently swallow it
+            try:
+                _api("DELETE", f"/networkvolumes/{vid}")
+            except SystemExit:
+                pass
+            sys.exit(err)
 
-    snapshot_id_out: str | None = None
+    if not volume_id:
+        sys.exit(
+            "No GPU capacity found in any datacenter.\n"
+            "Check https://www.runpod.io/gpu-instance/pricing for availability."
+        )
+    print(f">>> network volume {volume_id} / pod {pod_id} ready in {chosen_dc}")
+
     try:
-        print(">>> copying deploy key + setup.sh")
-        _ssh_run(ip, "mkdir -p /root/.ssh && chmod 700 /root/.ssh")
-        _scp(deploy_key, ip, "/root/.ssh/id_ed25519")
-        _scp(setup_script, ip, "/root/setup.sh")
+        pod = _wait_for_pod(pod_id)
+        ip = pod["publicIp"]
+        port = _get_ssh_port(pod)
+        print(f">>> setup pod ready at {ip}:{port}")
+        _wait_for_ssh(ip, port)
+
+        print(">>> copying deploy key and setup.sh")
+        _ssh_run(ip, port, "mkdir -p /root/.ssh && chmod 700 /root/.ssh")
+        _scp(deploy_key, ip, port, "/root/.ssh/id_ed25519")
+        _scp(setup_script, ip, port, "/root/setup.sh")
 
         env_prefix = (
-            f'REPO_URL={subprocess.list2cmdline([repo["url"]])} '
-            f'REPO_BRANCH={subprocess.list2cmdline([repo["branch"]])}'
+            f"REPO_URL={subprocess.list2cmdline([repo['url']])} "
+            f"REPO_BRANCH={subprocess.list2cmdline([repo['branch']])}"
         )
-        models_args = " ".join(subprocess.list2cmdline([m]) for m in models)
-        cmd = f"chmod +x /root/setup.sh && {env_prefix} /root/setup.sh {models_args}"
-        print(">>> running setup.sh on droplet (this takes 30–60 min for first model pulls)")
-        rc = _ssh_run(ip, cmd)
+        cmd = f"chmod +x /root/setup.sh && {env_prefix} /root/setup.sh"
+        print(">>> running setup.sh (~15 min)")
+        rc = _ssh_run(ip, port, cmd)
         if rc != 0:
-            sys.exit(f"setup script failed (rc={rc}); destroying droplet")
-
-        print(">>> shutting down droplet for clean snapshot")
-        subprocess.run(
-            ["doctl", "compute", "droplet-action", "shutdown", droplet_id, "--wait"],
-            check=False,
-        )
-
-        snap_name = f"docswarm-base-{int(time.time())}"
-        print(f">>> creating snapshot {snap_name} (5–15 min)")
-        _doctl("compute", "droplet-action", "snapshot", droplet_id,
-               "--snapshot-name", snap_name, "--wait")
-
-        out = _doctl("compute", "snapshot", "list", "--resource", "droplet",
-                     "--output", "json", capture=True)
-        snapshots = json.loads(out)
-        ours = [s for s in snapshots if s.get("name") == snap_name]
-        if not ours:
-            sys.exit(f"snapshot {snap_name} not found in `doctl compute snapshot list`")
-        snapshot_id_out = str(ours[0]["id"])
-        _patch_snapshot_id(snapshot_id_out)
-        print(f">>> snapshot {snapshot_id_out} written to config.yaml")
+            sys.exit(f"setup.sh failed (rc={rc}); volume {volume_id} preserved — rerun `make setup` to retry")
     finally:
-        print(f">>> destroying setup droplet {droplet_id}")
-        subprocess.run(
-            ["doctl", "compute", "droplet", "delete", droplet_id, "-f"],
-            check=False,
-        )
+        _delete_pod(pod_id)
 
-    if snapshot_id_out is None:
-        return 1
-    print(">>> done. you can now `make run`.")
+    _patch_config(volume_id, chosen_dc)
+    print(f">>> volume {volume_id} / datacenter {chosen_dc} written to config.yaml")
+    print(">>> setup complete — run `make run` to start a GPU session")
+    print("    (first run pulls Ollama models ~30 min; cached on the volume thereafter)")
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("action", choices=["up", "down", "snapshot"])
+    p.add_argument("action", choices=["up", "down", "setup"])
     args = p.parse_args()
     if args.action == "up":
         return up()
     if args.action == "down":
         return down()
-    return snapshot()
+    return setup()
 
 
 if __name__ == "__main__":

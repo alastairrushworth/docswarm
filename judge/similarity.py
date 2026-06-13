@@ -6,6 +6,7 @@ reachable, text similarity falls back to cosine of embedding vectors.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from functools import lru_cache
 from typing import Any
@@ -34,7 +35,10 @@ def jaccard(a: str, b: str) -> float:
 
 
 def _ollama_url() -> str:
-    return str(get("ollama.url", "http://ollama-main:11434")).rstrip("/")
+    env = os.environ.get("OLLAMA_URL", "")
+    if env:
+        return env.rstrip("/")
+    return str(get("ollama.url", "http://localhost:11434")).rstrip("/")
 
 
 def _embed_model() -> str:
