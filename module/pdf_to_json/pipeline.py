@@ -34,7 +34,7 @@ from .schema import Document
 
 logger = logging.getLogger("pdf_to_json")
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 _VISION_PROMPT = """\
 You are extracting structured data from a single page of a late-19th-century cycling
