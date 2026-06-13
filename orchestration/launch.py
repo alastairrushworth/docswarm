@@ -372,7 +372,7 @@ def up() -> int:
             "OLLAMA_URL=http://localhost:11434 "
             "PYTHONPATH=/workspace "
             "nohup python -m judge.judge >/var/log/judge.log 2>&1 & "
-            "echo '>>> starting developer-agent'; "
+            "echo '>>> starting harness (run_validation.py)'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "
             "ANTHROPIC_BASE_URL=http://localhost:11434 "
