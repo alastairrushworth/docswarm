@@ -65,10 +65,10 @@ Currency values stay as strings (e.g. "$2.00").
 """
 
 
-def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int = 200) -> Path:
+def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int, fmt: str) -> Path:
     page = doc.load_page(page_index)
     pix = page.get_pixmap(dpi=dpi)
-    pix.save(str(out))
+    pix.save(str(out), output=fmt, jpg_quality=85)
     return out
 
 
@@ -101,7 +101,8 @@ def _extract_page(
         logger.info("page %d: cache hit", page_index + 1)
         return cached
 
-    logger.info("page %d: vision call  model=%s  timeout=%.0fs", page_index + 1, model, timeout_seconds)
+    logger.info("page %d: vision call  model=%s  timeout=%.0fs",
+                page_index + 1, model, timeout_seconds)
     try:
         raw = ollama_client.generate(
             model=model,
@@ -153,6 +154,8 @@ def pdf_to_json(pdf_path: str) -> dict:
     """
     per_call_timeout = float(get("iteration.per_call_timeout_seconds", 120))
     page_concurrency = max(1, int(get("iteration.page_concurrency", 4)))
+    page_dpi = max(72, int(get("iteration.page_dpi", 150)))
+    page_fmt = str(get("iteration.page_format", "jpeg")).lower().strip(".")
     model = get("models.vision")
     if not model:
         warnings.warn("config.models.vision is missing; returning empty document")
@@ -177,9 +180,9 @@ def pdf_to_json(pdf_path: str) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         rendered: dict[int, Path] = {}
         for i in range(doc.page_count):
-            img = Path(tmp) / f"page_{i:03d}.png"
+            img = Path(tmp) / f"page_{i:03d}.{page_fmt}"
             try:
-                _render_page(doc, i, img)
+                _render_page(doc, i, img, dpi=page_dpi, fmt=page_fmt)
                 rendered[i] = img
             except Exception as e:
                 warnings.warn(f"page {i + 1}: render failed: {e}")
@@ -199,8 +202,8 @@ def pdf_to_json(pdf_path: str) -> dict:
                     warnings.warn(f"page {i + 1}: extraction errored: {e}")
                     results[i] = {}
         logger.info(
-            "extracted %d pages in %.1fs (concurrency=%d)",
-            len(results), time.monotonic() - t0, page_concurrency,
+            "extracted %d pages in %.1fs (concurrency=%d, dpi=%d, fmt=%s)",
+            len(results), time.monotonic() - t0, page_concurrency, page_dpi, page_fmt,
         )
 
         for i in sorted(results):
