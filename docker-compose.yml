@@ -85,7 +85,7 @@ services:
       - ./data/train:/workspace/data/train:ro
       - ./data/val:/workspace/data/val:ro
       - ./.git:/workspace/.git
-      - ./secrets:/secrets:ro
+      - ./secrets:/workspace/secrets:ro
     working_dir: /workspace
     command: ["python", "scripts/run_validation.py"]
 

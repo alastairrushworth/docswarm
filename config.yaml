@@ -2,7 +2,7 @@
 repo:
   url:             "git@github.com:alastairrushworth/docswarm.git"
   branch:          "development"
-  deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
+  deploy_key_path: "/workspace/secrets/deploy_key"  # staged by `make setup`; /root/.ssh also set
 
 runpod:
   # API key: export RUNPOD_API_KEY=<key>  (do not store here)
