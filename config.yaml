@@ -36,8 +36,8 @@ models:
 # ----- Iteration control -----
 iteration:
   wall_clock_hours:           12
-  page_concurrency:           1          # serialize: GPU runs one vision call at a time anyway
-  pdf_concurrency:            1          # serialize PDFs too; one val doc currently
+  page_concurrency:           4          # matches OLLAMA_NUM_PARALLEL; 55 GiB free VRAM fits 4 KV caches
+  pdf_concurrency:            1          # one val doc currently; raise when more docs added
   per_call_timeout_seconds:   300        # per-page timeout; 300s covers slow generation
   epsilon:                    0.005
   min_rounds_before_plateau:  3
