@@ -36,9 +36,9 @@ models:
 # ----- Iteration control -----
 iteration:
   wall_clock_hours:           12
-  page_concurrency:           4          # parallel page extractions per PDF
-  pdf_concurrency:            3          # parallel PDFs in a broad round
-  per_call_timeout_seconds:   300        # vision call timeout; 120s too short for cold model load
+  page_concurrency:           1          # serialize: GPU runs one vision call at a time anyway
+  pdf_concurrency:            1          # serialize PDFs too; one val doc currently
+  per_call_timeout_seconds:   300        # per-page timeout; 300s covers slow generation
   epsilon:                    0.005
   min_rounds_before_plateau:  3
   plateau_aggregate_floor:    0.30
