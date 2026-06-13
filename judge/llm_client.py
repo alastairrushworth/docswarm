@@ -17,6 +17,12 @@ from .config import get
 
 logger = logging.getLogger("judge.llm")
 
+_TRACE_CHARS = 500
+
+
+def _t(s: str) -> str:
+    return s[:_TRACE_CHARS] + "…" if len(s) > _TRACE_CHARS else s
+
 
 def _ollama_url() -> str:
     env = os.environ.get("OLLAMA_URL", "")
@@ -47,11 +53,14 @@ def chat(
         payload["options"] = options
     if response_format_json:
         payload["format"] = "json"
+    logger.info("chat  model=%s  system=%s  user=%s", model, _t(system), _t(user))
     r = httpx.post(f"{_ollama_url()}/api/chat", json=payload, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     msg = data.get("message") or {}
-    return msg.get("content", "")
+    result = msg.get("content", "")
+    logger.info("chat  response=%s", _t(result))
+    return result
 
 
 def chat_json(

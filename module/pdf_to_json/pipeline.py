@@ -98,8 +98,10 @@ def _extract_page(
 ) -> dict[str, Any]:
     cached = cache.load(pdf_hash, page_index, model, PROMPT_VERSION)
     if cached is not None:
+        logger.info("page %d: cache hit", page_index + 1)
         return cached
 
+    logger.info("page %d: vision call  model=%s  timeout=%.0fs", page_index + 1, model, timeout_seconds)
     try:
         raw = ollama_client.generate(
             model=model,
