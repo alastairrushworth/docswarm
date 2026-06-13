@@ -50,14 +50,14 @@ make test
 ```yaml
 repo:
   url:             "git@github.com:USER/REPO.git"      # your repo
-  branch:          "agent"
+  branch:          "development"
   deploy_key_path: "/secrets/deploy_key"               # mount a key file at ./secrets/deploy_key
 
 digitalocean:
-  region:        "nyc2"                                # adjust to a region with H200 availability
-  size:          "gpu-h200x1-141gb"
-  snapshot_id:   ""                                    # FILL IN after `make snapshot`
-  ssh_key_id:    ""                                    # `doctl compute ssh-key list` → ID
+  region:          ["nyc2"]                            # primary; region_fallbacks swept after
+  size:            ["gpu-h200x1-141gb"]                # primary GPU SKU; size_fallbacks after
+  snapshot_id:     ""                                  # auto-filled by `make snapshot`
+  ssh_key_id:      ""                                  # `doctl compute ssh-key list` → ID
 ```
 
 ### Knobs you'll touch most

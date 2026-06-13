@@ -1,14 +1,14 @@
 # PDF-to-Structured-JSON Translation: Project Spec
 
-> Status: **v1.0** — agent-ready. All tunable parameters live in `config.yaml` (§6) and can be revised without touching this document.
+> Status: **v1.1** — agent-ready. All tunable parameters live in `config.yaml` (§6) and can be revised without touching this document. Infrastructure specifics (GPU SKUs, regions, model tags) live in `config.yaml` and have since moved past this doc's original single-H200 assumption — see §1 and §5.
 
 ## 1. Overview
 
 Build a system that develops a Python module which translates magazine PDFs (late-19th-century cycling press, scanned, no reliable OCR) into JSON conforming to a fixed schema. Development is driven by Claude Code as an iterative agent, using local Ollama models — with vision models likely doing significant work, given the input format.
 
-**Run target**: a single H200 droplet on DigitalOcean. The user drives the run from their local terminal — `make run` provisions, runs, and tears down. Local-only modes were tried and removed: Metal/CPU vs CUDA divergence made local results misleading, and the `doctl`-driven flow is fast enough that the value of a local plumbing path didn't justify its maintenance cost.
+**Run target**: a single GPU droplet on DigitalOcean. The launcher sweeps a configured list of (size, region) pairs and takes the first available card — H200 preferred, H100 as fallback. DO does not expose per-region GPU stock via any API, so creation-by-attempt is the only way to find a free card. The reusable snapshot is built on a smaller 48 GB card (L40S / 6000 Ada) so its image can restore on any of those SKUs. The user drives the run from their local terminal — `make run` provisions, runs, and tears down. Local-only modes were tried and removed: Metal/CPU vs CUDA divergence made local results misleading, and the `doctl`-driven flow is fast enough that the value of a local plumbing path didn't justify its maintenance cost.
 
-The agent learns from 3 hand-curated `(PDF, JSON)` training pairs and improves against 3 validation pairs graded by a separate judge process. 3 test pairs are reserved for the user's final review. All set sizes are intended to grow over time.
+The agent learns from hand-curated `(PDF, JSON)` training pairs (currently 2) and improves against validation pairs (currently 1) graded by a separate judge process. Test pairs (currently 1) are reserved for the user's final review. These are small starter sets intended to grow over time — see §12.A for the noise this implies for the val signal today.
 
 The deliverable is the Python module, plus orchestration code that lets the user kick off a run from their local terminal with one command.
 
@@ -21,8 +21,7 @@ The deliverable is the Python module, plus orchestration code that lets the user
 - Multi-model strategy: agent routes between vision and text models, large and small, as it sees fit.
 - Per-page time budget enforced by the module.
 - Single GitHub repo as the working surface. Per-round commits with score in message — `git log` becomes the audit trail.
-- Single-command launch from the user's local terminal in either mode.
-- Local mode reaches end-to-end stack-up in <5 minutes.
+- Single-command launch from the user's local terminal.
 - All grading is graded (continuous), not pass/fail. Stop conditions are wall-clock + improvement plateau.
 - Round-by-round trend report committed to the repo so the user can see trajectory.
 
@@ -31,7 +30,6 @@ The deliverable is the Python module, plus orchestration code that lets the user
 - Web UI.
 - Online learning. The released module is frozen.
 - 100% accuracy.
-- Local mode as a quality test. Plumbing only.
 
 ## 3. Schema (starter Pydantic — finalize in `module/pdf_to_json/schema.py`)
 
@@ -110,11 +108,11 @@ doc = Document(
 
 ## 4. Data partitioning
 
-| Set | Initial count | PDF readable by developer agent | Ground truth readable by developer agent | Used for grading |
+| Set | Current count | PDF readable by developer agent | Ground truth readable by developer agent | Used for grading |
 |---|---|---|---|---|
-| Train | 3 | yes | yes | no — reference only |
-| Validation | 3 | yes | **no — judge container only** | yes |
-| Test | 3 | no during dev | no | no — final user review |
+| Train | 2 | yes | yes | no — reference only |
+| Validation | 1 | yes | **no — judge container only** | yes |
+| Test | 1 | no during dev | no | no — final user review |
 
 Each document lives in its own folder `data/<split>/<doc-id>/` containing `original.pdf` and `transcribed.json` (ground truth). The folder name is the `pdf_id`. Code enumerates the per-document folders; counts are not hardcoded.
 
@@ -126,13 +124,13 @@ Note: because truth is co-located with the PDF in each folder, the developer-age
 
 Three services on a single Docker network:
 
-1. **`ollama-main`** — the Ollama server. `OLLAMA_MAX_LOADED_MODELS` is set so two big models stay resident together: `models.coder` (drives Claude Code via Ollama's Anthropic-compatible API; also serves the judge's marking LLM) and `models.vision` (drives the translator). Embedding model loads alongside. All three services hit this one Ollama. Two coexist instead of two separate Ollama containers because the Ollama runtime already multiplexes models cleanly and the H200's 141 GB VRAM is plenty for both.
+1. **`ollama-main`** — the Ollama server. A single multimodal model currently fills three roles (`models.coder` = `models.vision` = `models.judge`, the same `qwen3.6` tag): it drives Claude Code via Ollama's native Anthropic-compatible API (`/v1/messages`), drives the translator's per-page vision extraction, and serves the judge's marking LLM. The embedding model loads alongside, so `OLLAMA_MAX_LOADED_MODELS` only needs to be 2. All three services hit this one Ollama. The config still allows distinct coder/vision/judge tags if a future loadout needs them; today one ~24 GB model fits comfortably on any of the swept GPUs (H200/H100/L40S/6000 Ada, ≥48 GB).
 2. **`developer-agent`** — runs the iteration harness, which between rounds shells out to `claude --print` so Claude Code can edit the translator code. Mounts: project repo (rw), `data/train/` (ro), `data/val/` (ro), `judge/inbox/` (rw), `judge/feedback/` (ro). **No mount** for anything under `data/test/`. The val mount also contains the co-located `transcribed.json` truth files — the agent is forbidden by rule (not by mount) from reading them.
 3. **`judge`** — runs `judge.judge` watching `judge/inbox/`. Mounts: `data/val/` (ro, reads `<doc>/transcribed.json`), `judge/inbox/` (ro), `judge/feedback/` (rw).
 
 ```
 host (local Mac, with doctl)
-└── DigitalOcean H200 droplet
+└── DigitalOcean GPU droplet (H200/H100/L40S/6000 Ada — first available)
     ├── docker-compose.yml
     ├── ollama-main          (qwen3.6:35b [coder+vision+judge] + nomic-embed)
     ├── developer-agent      (harness + Claude Code)
@@ -147,7 +145,7 @@ A single GitHub repo (URL in `config.yaml`) is the working surface and artifact 
 - Per round, the agent: edits files → runs validation → commits → pushes. Commit message template:
   `round {n}: aggregate {score:.3f} (Δ{delta:+.3f}); titles {x}, text {y}, order {z}, ...`
 - A trend file (§7.2) is committed alongside code, so the history shows both code changes and score evolution.
-- All work happens on the configured branch (default `agent`). User merges to `main` when satisfied.
+- All work happens on the configured branch (currently `development`). User merges to `main` when satisfied.
 
 ## 6. Configuration
 
@@ -157,18 +155,27 @@ A single GitHub repo (URL in `config.yaml`) is the working surface and artifact 
 # ----- Project identity -----
 repo:
   url:             "git@github.com:USER/REPO.git"   # FILL IN before first run
-  branch:          "agent"
+  branch:          "development"
   deploy_key_path: "/secrets/deploy_key"            # mounted into developer-agent container
 
 digitalocean:
-  api_token_env:   "DO_API_TOKEN"                   # name of env var holding the token
-  region:          "nyc2"                           # adjust to a region with H100 availability
-  size:            "gpu-h100x1-80gb"                # adjust to current DO SKU
-  snapshot_id:     ""                               # FILL IN after first `make build-snapshot`
+  api_token_env:    "DO_API_TOKEN"                  # name of env var holding the token
+  # DO hides per-region GPU stock, so the launcher finds a card by *attempting*
+  # creation across a (size, region) sweep — sizes outer, regions inner.
+  region:           ["nyc2"]                         # primary; region_fallbacks tried after
+  region_fallbacks: ["tor1", "atl1", "ams3", "..."] # widen as needed
+  size:             ["gpu-h200x1-141gb"]            # primary GPU SKU
+  size_fallbacks:   ["gpu-h100x1-80gb"]             # tried if primary unavailable
+  snapshot_size:    ["gpu-l40sx1-48gb", "gpu-6000adax1-48gb"]  # build on a 48GB card so the
+                                                    # snapshot's min-disk restores on any SKU above
+  snapshot_image:   "gpu-h100x1-base"               # generic NVIDIA base for `make snapshot`
+  snapshot_id:      ""                              # auto-filled by `make snapshot`
+  ssh_key_id:       ""                              # `doctl compute ssh-key list` → ID
+  droplet_name:     "docswarm-h200"
 
 # ----- Models (Ollama tags) -----
-# Two big models loaded concurrently in ollama-main; embedding alongside.
-# Agent may revise these in early rounds and commit the change.
+# One multimodal tag currently fills coder/vision/judge; embedding alongside.
+# Config still allows distinct tags per role. Agent may revise in early rounds.
 models:
   coder:     "qwen3.6:35b"         # Claude Code + judge LLM
   vision:    "qwen3.6:35b"         # translator (multimodal)
@@ -200,16 +207,20 @@ leakage:
   allow_structural_hints:        true
   hint_overlap_filter_threshold: 0.30
 
-# ----- Single Ollama, two big models loaded -----
+# ----- Single Ollama, one multimodal model + embedding loaded -----
 ollama:
   url:                "http://ollama-main:11434"
   num_parallel:       4
-  max_loaded_models:  3
+  max_loaded_models:  2
   keep_alive:         "24h"
-  context_length:     65536
+  context_length:     65536              # Claude Code requires ≥64k
+
+# Also in the live config (omitted here — see config.yaml): a `judge:` block
+# (alignment_floor, bands.metadata, bands.title — see §9.2) and a `paths:` block
+# (in-container workspace / data / inbox / feedback / cache paths).
 ```
 
-The agent reads from `config.yaml` at startup. Hardcoded values in code are forbidden.
+The agent reads from `config.yaml` at startup. Hardcoded values in code are forbidden. Note: the Ollama server env (`OLLAMA_*`) is set in `docker-compose.yml` and mirrors the `ollama:` block above — keep the two in sync.
 
 ## 7. Translation module — approach is the agent's call
 
@@ -228,7 +239,7 @@ def pdf_to_json(pdf_path: str) -> dict: ...
 
 Internals are the agent's design space. What the spec *does* fix:
 
-- **Available models**: from `config.yaml`. Agent picks per call. Both `models.coder` and `models.vision` stay resident in `ollama-main` (max-loaded-models setting) so neither has to hot-swap.
+- **Available models**: from `config.yaml`. Agent picks per call. Currently one multimodal tag fills the coder/vision/judge roles and stays resident in `ollama-main` (with the embedding model) so there is no hot-swap; the config still allows distinct tags per role if a future loadout needs them.
 - **Resilience**: the module always returns *some* JSON conforming (best effort) to the schema. On per-call timeout or extraction failure, fill what you can and continue. Never raise.
 - **Caching**: vision passes are expensive. The agent is encouraged to cache per-page intermediate representations across iteration rounds, **keyed by content hash of the PDF** (not filename, to avoid cache poisoning if a PDF is replaced). Cache writes are atomic (tmp + rename) so concurrent writers and killed processes can't corrupt entries.
 
@@ -300,7 +311,7 @@ A trend file `trends/round_history.json` is committed every round:
       "pages":           0.50
     },
     "marking_calls_in_round": 14,
-    "model_loadout": "translator_large=qwen2.5:32b, judge=mistral:7b"
+    "model_loadout": "coder=qwen3.6:35b, vision=qwen3.6:35b, judge=qwen3.6:35b, embedding=nomic-embed-text"
   }
 ]
 ```
@@ -517,7 +528,7 @@ project/
 
 ## 12. Concerns to be aware of
 
-A. **3 validation PDFs is a noisy aggregate signal.** The plateau detector at default `epsilon=0.005` may trigger on noise rather than real plateaus. Grow validation as soon as practical. Until then, the test-set human review is the real signal.
+A. **The validation set is currently a single PDF — the aggregate is one document's score.** With n=1 there is no averaging, so round-to-round variance from non-deterministic vision output dominates and the plateau detector (default `epsilon=0.005`) is essentially meaningless. Growing validation is the first priority. Until then, treat the trend as indicative only; the test-set human review is the real signal.
 
 B. **Aggregate weights are guesses.** Defaults put 0.30 on text similarity. Reconsider after first run shows what's actually achievable per component.
 
@@ -532,6 +543,10 @@ F. **Catastrophic first-round failures are protected.** The plateau detector req
 G. **Per-round commits inflate git history.** The `agent` branch will accumulate many commits. Periodically squash, or accept the noise as the price of the audit trail.
 
 H. **The non-leakage filter is best-effort.** A clever paraphrase from the judge LLM might evade the substring filter. Acceptable for non-adversarial use.
+
+I. **Everything rides on one local model being good enough at two hard jobs.** The single `qwen3.6` tag must (a) return real image understanding so `pdf_to_json` can read scanned pages with no text layer, and (b) drive Claude Code agentically (tool use, multi-file edits) well enough to make progress each round. Before a paid run, confirm the exact Ollama tag actually renders images — the library tag is `qwen3.6:35b-a3b` (an A3B MoE with ~3B active params), and some Ollama builds ship text-only, which would silently degrade every page extraction to nothing. Watch early rounds for the agent failing to use tools; a 3B-active model is a lot to ask for agentic coding. If either job underperforms, split the roles into distinct tags (config supports it) or raise model size.
+
+J. **GPU availability is not guaranteed.** DO does not expose per-region GPU stock, so the launcher finds a card by attempting creation across a (size, region) sweep; a run can fail to provision entirely if no card is free anywhere in the sweep. The snapshot is deliberately built on a 48 GB card so its image can restore on the widest set of SKUs.
 
 ## 13. AGENT.md (required contents — lives in repo root, read by Claude Code first)
 

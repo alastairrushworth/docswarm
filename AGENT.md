@@ -135,7 +135,7 @@ Make best efforts to close every error. Graded scores are *not* permission to se
 ## Model selection
 
 - Use names from `config.yaml.models`. You may revise these in early rounds and commit the change.
-- Do **not** pull arbitrary new Ollama models that aren't in the snapshot without rebuilding it (`make build-snapshot`). Pulling at runtime on the H100/H200 wastes wall-clock budget.
+- Do **not** pull arbitrary new Ollama models that aren't in the snapshot without rebuilding it (`make snapshot`). Pulling at runtime on the H100/H200 wastes wall-clock budget.
 - Concurrent requests against Ollama are how you saturate the GPU on this workload — set `OLLAMA_NUM_PARALLEL` and fan out where it makes sense.
 
 ## VRAM allocation

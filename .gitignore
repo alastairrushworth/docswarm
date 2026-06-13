@@ -1,6 +1,8 @@
 .cache/
 .droplet_id
 .droplet_ip
+.pod_id
+.env
 __pycache__/
 *.pyc
 .pytest_cache/
