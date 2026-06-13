@@ -341,6 +341,7 @@ def up() -> int:
         _sync_data(ip, port)
 
         coder_model = models_cfg.get("coder", "qwen3.6:35b")
+        vision_model = models_cfg.get("vision", coder_model)
         embed_model = models_cfg.get("embedding", "nomic-embed-text")
         ollama_env = (
             f"OLLAMA_NUM_PARALLEL={ollama_cfg.get('num_parallel', 4)} "
@@ -364,7 +365,8 @@ def up() -> int:
             "  { echo 'ERROR: ollama failed to start'; cat /var/log/ollama.log; exit 1; }; "
             f"echo '>>> pulling models (skipped if already cached)'; "
             f"ollama pull {coder_model}; "
-            f"ollama pull {embed_model}; "
+            + (f"ollama pull {vision_model}; " if vision_model != coder_model else "")
+            + f"ollama pull {embed_model}; "
             "echo '>>> starting judge'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "

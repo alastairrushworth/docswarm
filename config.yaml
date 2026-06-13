@@ -29,7 +29,7 @@ models:
   # covers all three roles. The `27b-coding-*` and `*-mlx-*` tags are MLX
   # (Apple Silicon only) and will 412 on Linux.
   coder:     "qwen3.6:35b"
-  vision:    "qwen3.6:35b"            # same model serves both roles
+  vision:    "nemotron3:33b"
   judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"       # ~270MB, similarity scoring
 
@@ -76,7 +76,7 @@ judge:
 ollama:
   url:                "http://localhost:11434"
   num_parallel:       4                  # OLLAMA_NUM_PARALLEL on the server
-  max_loaded_models:  2                  # qwen3.6:35b (multimodal) + embedding
+  max_loaded_models:  3                  # qwen3.6:35b + nemotron3:33b + embedding
   keep_alive:         "24h"
   context_length:     65536              # Claude Code requires ≥64k
 
