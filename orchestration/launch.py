@@ -273,17 +273,38 @@ def up() -> int:
         ollama_cfg = cfg.get("ollama", {})
         models_cfg = cfg.get("models", {})
 
-        # Pull latest code and restore SSH keys for git push inside the agent.
-        sync_cmd = (
-            f"set -e; cd /workspace && "
-            f"git fetch origin && git checkout {branch} && git pull --ff-only && "
-            f"mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
-            f"cp /workspace/secrets/deploy_key /root/.ssh/id_ed25519 && "
-            f"chmod 600 /root/.ssh/id_ed25519 && "
-            f"ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null; true"
+        # 1. Set up SSH key so git and later agent commits work.
+        print(">>> setting up SSH keys")
+        rc = _ssh_run(ip, port,
+            "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+            "cp /workspace/secrets/deploy_key /root/.ssh/id_ed25519 && "
+            "chmod 600 /root/.ssh/id_ed25519 && "
+            "ssh-keyscan github.com >> /root/.ssh/known_hosts 2>/dev/null; true"
         )
-        print(">>> syncing code and SSH keys")
-        rc = _ssh_run(ip, port, sync_cmd)
+        if rc != 0:
+            return rc
+
+        # 2. Install tools + pull latest code (~5 min on cold pod, fast if cached).
+        # Tools (ollama, node, claude, python packages) are not on the network volume —
+        # they must be installed fresh each time a new pod starts.
+        print(">>> bootstrapping tools and pulling code (~5 min on cold pod)")
+        bootstrap = (
+            "set -e; "
+            "command -v ollama >/dev/null 2>&1 || ("
+            "  DEBIAN_FRONTEND=noninteractive apt-get update -q && "
+            "  DEBIAN_FRONTEND=noninteractive apt-get install -y -q zstd && "
+            "  curl -fsSL https://ollama.ai/install.sh | sh); "
+            "command -v node >/dev/null 2>&1 || ("
+            "  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && "
+            "  DEBIAN_FRONTEND=noninteractive apt-get install -y -q nodejs); "
+            "command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code; "
+            "pip install --quiet --upgrade "
+            "'pydantic>=2.6' 'pyyaml>=6.0' 'pymupdf>=1.24' 'Pillow>=10.0' "
+            "'httpx>=0.27' 'numpy>=1.26' 'scipy>=1.11' 'pytest>=8.0'; "
+            f"cd /workspace && git fetch origin && "
+            f"git checkout {branch} && git pull --ff-only"
+        )
+        rc = _ssh_run(ip, port, bootstrap)
         if rc != 0:
             return rc
 
@@ -296,7 +317,7 @@ def up() -> int:
             f"OLLAMA_CONTEXT_LENGTH={ollama_cfg.get('context_length', 65536)}"
         )
 
-        # Start Ollama + judge in background, run developer-agent in foreground.
+        # 3. Start Ollama + judge in background, run developer-agent in foreground.
         # Model weights persist on /workspace/ollama-data between runs.
         run_cmd = (
             "set -e; cd /workspace; "
