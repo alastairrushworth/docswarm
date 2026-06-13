@@ -212,6 +212,36 @@ def _scp(local: Path, ip: str, port: str, remote: str) -> None:
     )
 
 
+def _sync_data(ip: str, port: str) -> None:
+    """Copy local data/{train,val,test} document folders to /workspace/data/ on the pod.
+
+    Only doc subdirectories (not .gitkeep) are transferred. The network volume
+    persists this data across all pod runs, so this only needs to run during
+    setup (or when local data changes).
+    """
+    deploy_key = ROOT / "secrets/deploy_key"
+    scp_base = [
+        "scp", "-i", str(deploy_key),
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "BatchMode=yes",
+        "-r", "-P", port,
+    ]
+    for split in ("train", "val", "test"):
+        local = ROOT / "data" / split
+        if not local.is_dir():
+            continue
+        doc_dirs = [d for d in sorted(local.iterdir()) if d.is_dir()]
+        if not doc_dirs:
+            continue
+        print(f">>> syncing data/{split} ({len(doc_dirs)} doc(s))")
+        _ssh_run(ip, port, f"mkdir -p /workspace/data/{split}")
+        for doc_dir in doc_dirs:
+            subprocess.run(
+                [*scp_base, str(doc_dir), f"root@{ip}:/workspace/data/{split}/"],
+                check=True,
+            )
+
+
 def _git_branch() -> str:
     r = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -307,6 +337,8 @@ def up() -> int:
         rc = _ssh_run(ip, port, bootstrap)
         if rc != 0:
             return rc
+
+        _sync_data(ip, port)
 
         coder_model = models_cfg.get("coder", "qwen3.6:35b")
         embed_model = models_cfg.get("embedding", "nomic-embed-text")
@@ -482,6 +514,8 @@ def setup() -> int:
         rc = _ssh_run(ip, port, cmd)
         if rc != 0:
             sys.exit(f"setup.sh failed (rc={rc}); volume {volume_id} preserved — rerun `make setup` to retry")
+
+        _sync_data(ip, port)
     finally:
         _delete_pod(pod_id)
 
