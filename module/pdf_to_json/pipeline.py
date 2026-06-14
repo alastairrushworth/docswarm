@@ -95,23 +95,28 @@ def _extract_page(
     image_path: Path,
     model: str,
     timeout_seconds: float,
+    options: dict[str, Any],
 ) -> dict[str, Any]:
     cached = cache.load(pdf_hash, page_index, model, PROMPT_VERSION)
     if cached is not None:
         logger.info("page %d: cache hit", page_index + 1)
         return cached
 
-    logger.info("page %d: vision call  model=%s  timeout=%.0fs",
-                page_index + 1, model, timeout_seconds)
+    logger.info("page %d: vision call  model=%s  timeout=%.0fs  num_ctx=%s",
+                page_index + 1, model, timeout_seconds, options.get("num_ctx"))
     try:
         raw = ollama_client.generate(
             model=model,
             prompt=_VISION_PROMPT,
             images=[image_path],
             timeout=timeout_seconds,
+            options=options,
         )
     except Exception as e:
-        warnings.warn(f"page {page_index + 1}: vision call failed: {e}")
+        # ConnectError here = the Ollama server is down (e.g. OOM-crashed),
+        # not a slow page; ReadTimeout = genuinely slow generation.
+        logger.warning("page %d: vision call failed (%s): %s",
+                       page_index + 1, type(e).__name__, e)
         return {}
 
     parsed = _parse_json(raw)
@@ -156,6 +161,13 @@ def pdf_to_json(pdf_path: str) -> dict:
     page_concurrency = max(1, int(get("iteration.page_concurrency", 4)))
     page_dpi = max(72, int(get("iteration.page_dpi", 150)))
     page_fmt = str(get("iteration.page_format", "jpeg")).lower().strip(".")
+    vision_num_ctx = max(2048, int(get("iteration.vision_num_ctx", 8192)))
+    vision_num_predict = max(256, int(get("iteration.vision_num_predict", 4096)))
+    vision_options = {
+        "num_ctx": vision_num_ctx,
+        "num_predict": vision_num_predict,
+        "temperature": 0,
+    }
     model = get("models.vision")
     if not model:
         warnings.warn("config.models.vision is missing; returning empty document")
@@ -191,7 +203,10 @@ def pdf_to_json(pdf_path: str) -> dict:
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=page_concurrency) as ex:
             futs = {
-                ex.submit(_extract_page, pdf_hash, i, img, model, per_call_timeout): i
+                ex.submit(
+                    _extract_page, pdf_hash, i, img, model,
+                    per_call_timeout, vision_options,
+                ): i
                 for i, img in rendered.items()
             }
             for fut in as_completed(futs):
@@ -201,9 +216,12 @@ def pdf_to_json(pdf_path: str) -> dict:
                 except Exception as e:
                     warnings.warn(f"page {i + 1}: extraction errored: {e}")
                     results[i] = {}
+        n_ok = sum(1 for v in results.values() if v)
         logger.info(
-            "extracted %d pages in %.1fs (concurrency=%d, dpi=%d, fmt=%s)",
-            len(results), time.monotonic() - t0, page_concurrency, page_dpi, page_fmt,
+            "extracted %d pages (%d non-empty, %d empty/failed) in %.1fs "
+            "(concurrency=%d, dpi=%d, fmt=%s, num_ctx=%d)",
+            len(results), n_ok, len(results) - n_ok, time.monotonic() - t0,
+            page_concurrency, page_dpi, page_fmt, vision_num_ctx,
         )
 
         for i in sorted(results):

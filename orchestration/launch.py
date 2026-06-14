@@ -367,6 +367,11 @@ def up() -> int:
             f"ollama pull {coder_model}; "
             + (f"ollama pull {vision_model}; " if vision_model != coder_model else "")
             + f"ollama pull {embed_model}; "
+            "echo '>>> GPU memory at startup:'; "
+            "nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free "
+            "--format=csv,noheader 2>/dev/null || true; "
+            "echo '>>> tailing /var/log/ollama.log (lines prefixed [ollama]) for live crash diagnostics'; "
+            "stdbuf -oL tail -n 5 -F /var/log/ollama.log 2>/dev/null | sed -u 's/^/[ollama] /' & "
             "echo '>>> starting judge'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "

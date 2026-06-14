@@ -41,6 +41,13 @@ iteration:
   per_call_timeout_seconds:   300        # per-page timeout; 300s covers slow generation
   page_dpi:                   150        # render resolution; 200 DPI → ~20 tiles, 150 DPI → ~10 tiles
   page_format:                "jpeg"     # jpeg (smaller payload) or png (lossless)
+  # Per-page vision context window, DECOUPLED from ollama.context_length (64k).
+  # One magazine page needs ~3-6k tokens (image tiles + prompt + JSON out). The
+  # global 64k default was being applied to the vision model too, forcing Ollama
+  # to reserve num_ctx x num_parallel KV cache (~60 GB on a 33B model) which
+  # OOM-crashed the server mid-run (→ connection-refused cascade, not slowness).
+  vision_num_ctx:             8192       # context window for a single-page vision call
+  vision_num_predict:         4096       # cap on generated JSON tokens per page
   epsilon:                    0.005
   min_rounds_before_plateau:  3
   plateau_aggregate_floor:    0.30
