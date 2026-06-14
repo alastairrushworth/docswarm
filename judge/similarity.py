@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from functools import lru_cache
+import time
 from typing import Any
 
 import httpx
@@ -45,24 +45,53 @@ def _embed_model() -> str:
     return str(get("models.embedding", "nomic-embed-text"))
 
 
-@lru_cache(maxsize=512)
+# Embedding circuit breaker. The article-alignment matrix embeds every unique
+# article text; a stalled/cold embed model must not turn one broad eval into
+# N+M serial timeouts (that overran the harness's 600s judge window). So: cache
+# only successes (a failure is never cached, so it can self-heal), and on any
+# failure open a short cooldown during which we score with jaccard instead of
+# paying the per-call timeout again.
+_embed_cache: dict[str, tuple[float, ...]] = {}
+_embed_blocked_until = 0.0
+
+
+def _embed_timeout() -> float:
+    return float(get("judge.embed_timeout_seconds", 8.0))
+
+
+def _embed_cooldown() -> float:
+    return float(get("judge.embed_cooldown_seconds", 60.0))
+
+
 def _embed(text: str) -> tuple[float, ...] | None:
+    global _embed_blocked_until
     text = (text or "").strip()
     if not text:
+        return None
+    hit = _embed_cache.get(text)
+    if hit is not None:
+        return hit
+    if time.monotonic() < _embed_blocked_until:
         return None
     try:
         r = httpx.post(
             f"{_ollama_url()}/api/embeddings",
             json={"model": _embed_model(), "prompt": text},
-            timeout=15.0,
+            timeout=_embed_timeout(),
         )
         r.raise_for_status()
         v = r.json().get("embedding") or []
         if not v:
             return None
-        return tuple(float(x) for x in v)
+        vec = tuple(float(x) for x in v)
+        _embed_cache[text] = vec
+        return vec
     except Exception as e:
-        logger.debug("embed unavailable, falling back to jaccard: %s", e)
+        cooldown = _embed_cooldown()
+        _embed_blocked_until = time.monotonic() + cooldown
+        logger.warning(
+            "embeddings unavailable (%s); scoring text with jaccard for ~%.0fs", e, cooldown
+        )
         return None
 
 

@@ -86,6 +86,12 @@ judge:
   bands:
     metadata: 0.90
     title:    0.85
+  # Embedding circuit breaker for text-similarity scoring. The article-alignment
+  # matrix embeds every unique article text; if the embed model stalls, a short
+  # timeout plus a cooldown keeps a broad eval from exceeding the harness's 600s
+  # judge window — it falls back to jaccard instead of N serial timeouts.
+  embed_timeout_seconds:  8
+  embed_cooldown_seconds: 60
 
 # ----- Single Ollama instance shared by translator + agent + judge -----
 ollama:

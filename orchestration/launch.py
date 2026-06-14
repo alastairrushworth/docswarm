@@ -370,6 +370,14 @@ def up() -> int:
             "echo '>>> GPU memory at startup:'; "
             "nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free "
             "--format=csv,noheader 2>/dev/null || true; "
+            # Pre-warm the embed model so its (slow, cold) network-volume read
+            # happens once here — not lazily inside the judge, where a 499 abort
+            # turned every text-similarity call into a timeout and stalled scoring.
+            f"echo '>>> warming embed model {embed_model}'; "
+            "curl -sf --max-time 180 http://localhost:11434/api/embeddings "
+            f"-d '{{\"model\":\"{embed_model}\",\"prompt\":\"warmup\"}}' >/dev/null 2>&1 && "
+            "  echo '    embed model ready' || "
+            "  echo '    WARN: embed warmup failed (judge will fall back to jaccard)'; "
             "echo '>>> tailing /var/log/ollama.log (lines prefixed [ollama]) for live crash diagnostics'; "
             "stdbuf -oL tail -n 5 -F /var/log/ollama.log 2>/dev/null | sed -u 's/^/[ollama] /' & "
             "echo '>>> starting judge'; "
@@ -377,6 +385,7 @@ def up() -> int:
             "OLLAMA_URL=http://localhost:11434 "
             "PYTHONPATH=/workspace "
             "nohup python -m judge.judge >/var/log/judge.log 2>&1 & "
+            "stdbuf -oL tail -n 100 -F /var/log/judge.log 2>/dev/null | sed -u 's/^/[judge] /' & "
             "echo '>>> starting harness (run_validation.py)'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "
