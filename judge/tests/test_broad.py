@@ -92,6 +92,21 @@ def test_title_band_snaps_near_matches():
     assert res["components"]["titles"]["score"] == 1.0
 
 
+def test_malformed_nested_fields_do_not_crash():
+    # Ground truth (or model output) can carry a bare string where the schema
+    # expects an object — e.g. magazine.publisher as a string. The eval must
+    # coerce, not raise (which previously killed the whole judge daemon).
+    truth = _truth()
+    truth["magazine"]["publisher"] = "Falcon Cycles Ltd, Smethwick"  # string, not dict
+    pred = copy.deepcopy(_truth())
+    res = _evaluate(pred, truth)  # must not raise
+    assert 0.0 <= res["components"]["metadata"]["score"] <= 1.0
+    # Also tolerate the magazine block itself being a non-dict.
+    truth2 = _truth()
+    truth2["magazine"] = "Some Magazine"
+    assert _evaluate(copy.deepcopy(_truth()), truth2)  # must not raise
+
+
 def test_hints_never_leak_truth_content():
     truth = _truth()
     pred = {

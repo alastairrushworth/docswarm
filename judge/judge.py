@@ -106,7 +106,21 @@ def _process_one(req_path: Path, cfg: dict, feedback_dir: Path) -> None:
         logger.error("malformed request %s: %s", req_path.name, e)
         return
 
-    response = handle(req, cfg)
+    try:
+        response = handle(req, cfg)
+    except Exception as e:
+        # A long-running daemon must survive a malformed request, and the harness
+        # must get *some* feedback (not a 600s timeout). Log, emit a 0-score error
+        # response, and keep watching the inbox.
+        logger.exception("handler crashed for %s", req_path.name)
+        response = {
+            "mode": req.get("mode"),
+            "pdf_id": req.get("pdf_id", ""),
+            "round": req.get("round"),
+            "error": f"judge handler crashed: {type(e).__name__}: {e}",
+            "aggregate": 0.0,
+            "components": {},
+        }
     out = feedback_dir / req_path.name
     tmp = out.with_suffix(out.suffix + ".tmp")
     with tmp.open("w") as f:

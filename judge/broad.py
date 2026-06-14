@@ -20,6 +20,15 @@ from .similarity import text_similarity, title_similarity
 _DEFAULT_BANDS = {"metadata": 0.90, "title": 0.85}
 
 
+def _as_dict(x: Any) -> dict[str, Any]:
+    """Coerce a possibly-malformed nested field to a dict. Ground truth or model
+    output can carry a string/None where the schema expects an object (e.g.
+    `magazine.publisher` as a bare string); treat those as empty rather than
+    crashing the whole eval. `x or {}` is not enough — a truthy non-dict (a
+    non-empty string) slips through and then `.get` raises."""
+    return x if isinstance(x, dict) else {}
+
+
 def params_from_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Pull the essence-over-form knobs from config so the judge and the agent's
     train self-scoring use identical settings."""
@@ -39,9 +48,9 @@ def _schema_validity(pred: dict[str, Any]) -> float:
 
 
 def _schema_checks(pred: dict[str, Any]) -> dict[str, bool]:
-    mag = pred.get("magazine") or {}
-    issue = mag.get("issue") or {}
-    pub = mag.get("publisher") or {}
+    mag = _as_dict(pred.get("magazine"))
+    issue = _as_dict(mag.get("issue"))
+    pub = _as_dict(mag.get("publisher"))
     return {
         "magazine.editor": bool(mag.get("editor")),
         "magazine.issue.date": bool(issue.get("date")),
@@ -112,10 +121,10 @@ def _metadata(
     integer fields parsed before comparison. Returns (score, matched, total,
     per_field) where per_field carries each field's banded score, raw
     similarity, and whether the prediction populated it (for hints)."""
-    p = pred.get("magazine") or {}
-    t = truth.get("magazine") or {}
-    pi, ti = (p.get("issue") or {}), (t.get("issue") or {})
-    pp, tp = (p.get("publisher") or {}), (t.get("publisher") or {})
+    p = _as_dict(pred.get("magazine"))
+    t = _as_dict(truth.get("magazine"))
+    pi, ti = _as_dict(p.get("issue")), _as_dict(t.get("issue"))
+    pp, tp = _as_dict(p.get("publisher")), _as_dict(t.get("publisher"))
 
     per_field: list[dict[str, Any]] = []
 
