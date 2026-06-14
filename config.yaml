@@ -20,16 +20,17 @@ runpod:
   pod_name:          "docswarm"
 
 # ----- Models (Ollama tags) -----
-# Two Ollama models loaded concurrently in a single Ollama server:
-#  - coder: drives Claude Code (developer agent) and the judge LLM (marking)
-#  - vision: multimodal, drives the translator's per-page extraction
-# Embedding stays loaded alongside.
+# qwen3.6:35b is multimodal (Text + Image) and covers all three LLM roles —
+# coder (Claude Code dev agent), vision (per-page extraction) and judge
+# (marking) — so a single 35B model stays resident plus the embedder. This
+# avoids holding a second large model (e.g. nemotron3:33b) in VRAM alongside it,
+# and qwen-VL's dynamic-resolution tiling gives more image detail per page than
+# nemotron's single 256-token slice.
 models:
-  # qwen3.6:35b is multimodal (Text + Image), 24GB, 256K ctx — one model
-  # covers all three roles. The `27b-coding-*` and `*-mlx-*` tags are MLX
-  # (Apple Silicon only) and will 412 on Linux.
+  # qwen3.6:35b is multimodal (Text + Image), 24GB, 256K ctx. The `27b-coding-*`
+  # and `*-mlx-*` tags are MLX (Apple Silicon only) and will 412 on Linux.
   coder:     "qwen3.6:35b"
-  vision:    "nemotron3:33b"
+  vision:    "qwen3.6:35b"
   judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"       # ~270MB, similarity scoring
 
@@ -48,6 +49,11 @@ iteration:
   # OOM-crashed the server mid-run (→ connection-refused cascade, not slowness).
   vision_num_ctx:             8192       # context window for a single-page vision call
   vision_num_predict:         4096       # cap on generated JSON tokens per page
+  # nemotron3 is a reasoning model. Left on, it spends the entire num_predict
+  # budget on hidden chain-of-thought and returns an empty `response`
+  # (out_tokens=4096, done=length) — the page is lost and ~23s of GPU wasted.
+  # Disabled, it emits the JSON directly.
+  vision_think:               false      # send "think": false on vision calls
   epsilon:                    0.005
   min_rounds_before_plateau:  3
   plateau_aggregate_floor:    0.30
@@ -81,11 +87,11 @@ judge:
     metadata: 0.90
     title:    0.85
 
-# ----- Single Ollama instance, two models loaded, shared by translator + agent + judge -----
+# ----- Single Ollama instance shared by translator + agent + judge -----
 ollama:
   url:                "http://localhost:11434"
   num_parallel:       4                  # OLLAMA_NUM_PARALLEL on the server
-  max_loaded_models:  3                  # qwen3.6:35b + nemotron3:33b + embedding
+  max_loaded_models:  3                  # qwen3.6:35b (coder+vision+judge) + embedding
   keep_alive:         "24h"
   context_length:     65536              # Claude Code requires ≥64k
 

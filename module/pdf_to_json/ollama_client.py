@@ -31,14 +31,18 @@ def _b64_image(path: str | Path) -> str:
 def _log_metrics(model: str, data: dict[str, Any], wall_s: float) -> None:
     """Surface Ollama's own timing/token counts so slow or truncated calls are
     diagnosable straight from the `make run` stream. `done_reason="length"`
-    means the output hit num_predict and was truncated (likely invalid JSON)."""
+    means the output hit num_predict and was truncated (likely invalid JSON);
+    a large think_chars alongside an empty response means a reasoning model spent
+    the whole budget on hidden reasoning — disable thinking for that call."""
     out_tokens = data.get("eval_count")
     eval_dur_ns = data.get("eval_duration")
     tok_s = out_tokens / (eval_dur_ns / 1e9) if out_tokens and eval_dur_ns else None
+    thinking = data.get("thinking") or ""
     logger.info(
-        "generate  model=%s wall=%.1fs in_tokens=%s out_tokens=%s tok/s=%s done=%s",
+        "generate  model=%s wall=%.1fs in_tokens=%s out_tokens=%s tok/s=%s "
+        "think_chars=%d done=%s",
         model, wall_s, data.get("prompt_eval_count"), out_tokens,
-        f"{tok_s:.1f}" if tok_s else "-", data.get("done_reason"),
+        f"{tok_s:.1f}" if tok_s else "-", len(thinking), data.get("done_reason"),
     )
 
 
@@ -49,19 +53,22 @@ def generate(
     *,
     timeout: float = 60.0,
     options: dict[str, Any] | None = None,
+    think: bool | None = None,
 ) -> str:
     img_count = len(images) if images else 0
     opts = options or {}
     logger.info(
-        "generate  model=%s images=%d num_ctx=%s num_predict=%s timeout=%.0fs  prompt=%s",
+        "generate  model=%s images=%d num_ctx=%s num_predict=%s think=%s timeout=%.0fs  prompt=%s",
         model, img_count, opts.get("num_ctx", "-"), opts.get("num_predict", "-"),
-        timeout, _t(prompt),
+        think, timeout, _t(prompt),
     )
     payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
     if images:
         payload["images"] = [_b64_image(p) for p in images]
     if options:
         payload["options"] = options
+    if think is not None:
+        payload["think"] = think
     t0 = time.monotonic()
     r = httpx.post(f"{_url()}/api/generate", json=payload, timeout=timeout)
     r.raise_for_status()

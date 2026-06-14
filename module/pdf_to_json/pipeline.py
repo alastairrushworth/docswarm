@@ -34,10 +34,10 @@ from .schema import Document
 
 logger = logging.getLogger("pdf_to_json")
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 _VISION_PROMPT = """\
-You are extracting structured data from a single page of a late-19th-century cycling
+You are extracting structured data from a single page of a scanned cycling
 magazine. Respond with a single JSON object. No prose outside the JSON.
 
 Schema:
@@ -96,14 +96,15 @@ def _extract_page(
     model: str,
     timeout_seconds: float,
     options: dict[str, Any],
+    think: bool,
 ) -> dict[str, Any]:
     cached = cache.load(pdf_hash, page_index, model, PROMPT_VERSION)
     if cached is not None:
         logger.info("page %d: cache hit", page_index + 1)
         return cached
 
-    logger.info("page %d: vision call  model=%s  timeout=%.0fs  num_ctx=%s",
-                page_index + 1, model, timeout_seconds, options.get("num_ctx"))
+    logger.info("page %d: vision call  model=%s  timeout=%.0fs  num_ctx=%s  think=%s",
+                page_index + 1, model, timeout_seconds, options.get("num_ctx"), think)
     try:
         raw = ollama_client.generate(
             model=model,
@@ -111,6 +112,7 @@ def _extract_page(
             images=[image_path],
             timeout=timeout_seconds,
             options=options,
+            think=think,
         )
     except Exception as e:
         # ConnectError here = the Ollama server is down (e.g. OOM-crashed),
@@ -163,6 +165,7 @@ def pdf_to_json(pdf_path: str) -> dict:
     page_fmt = str(get("iteration.page_format", "jpeg")).lower().strip(".")
     vision_num_ctx = max(2048, int(get("iteration.vision_num_ctx", 8192)))
     vision_num_predict = max(256, int(get("iteration.vision_num_predict", 4096)))
+    vision_think = bool(get("iteration.vision_think", False))
     vision_options = {
         "num_ctx": vision_num_ctx,
         "num_predict": vision_num_predict,
@@ -205,7 +208,7 @@ def pdf_to_json(pdf_path: str) -> dict:
             futs = {
                 ex.submit(
                     _extract_page, pdf_hash, i, img, model,
-                    per_call_timeout, vision_options,
+                    per_call_timeout, vision_options, vision_think,
                 ): i
                 for i, img in rendered.items()
             }
