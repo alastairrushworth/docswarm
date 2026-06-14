@@ -331,7 +331,10 @@ def up() -> int:
             "pip install --quiet --upgrade "
             "'pydantic>=2.6' 'pyyaml>=6.0' 'pymupdf>=1.24' 'Pillow>=10.0' "
             "'httpx>=0.27' 'numpy>=1.26' 'scipy>=1.11' 'pytest>=8.0'; "
-            f"cd /workspace && git fetch origin && "
+            # An interrupted prior run (Ctrl-C mid commit/push) can leave a stale
+            # .git/index.lock on the persistent volume, which blocks all git ops on
+            # the next pod. The pod is fresh, so no live git process owns it — clear it.
+            f"cd /workspace && rm -f .git/index.lock && git fetch origin && "
             f"git checkout {branch} && git pull --ff-only"
         )
         rc = _ssh_run(ip, port, bootstrap)
