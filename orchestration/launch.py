@@ -378,8 +378,14 @@ def up() -> int:
             f"-d '{{\"model\":\"{embed_model}\",\"prompt\":\"warmup\"}}' >/dev/null 2>&1 && "
             "  echo '    embed model ready' || "
             "  echo '    WARN: embed warmup failed (judge will fall back to jaccard)'; "
-            "echo '>>> tailing /var/log/ollama.log (lines prefixed [ollama]) for live crash diagnostics'; "
-            "stdbuf -oL tail -n 5 -F /var/log/ollama.log 2>/dev/null | sed -u 's/^/[ollama] /' & "
+            # Stream only crash-relevant ollama lines ([ollama] prefix); the
+            # per-request slot/timing/prompt-cache dumps are dropped now that the
+            # OOM crash is fixed and just bury the signal.
+            "echo '>>> tailing /var/log/ollama.log errors/warnings only (prefixed [ollama])'; "
+            "stdbuf -oL tail -n 5 -F /var/log/ollama.log 2>/dev/null "
+            "| grep --line-buffered -iE "
+            "'error|warn|fail|oom|out of memory|panic|abort|killed|no space|loading model' "
+            "| sed -u 's/^/[ollama] /' & "
             "echo '>>> starting judge'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "
