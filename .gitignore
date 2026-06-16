@@ -1,4 +1,8 @@
 .cache/
+# Ollama model weights live at /workspace/ollama-data on the pod, where the repo
+# root *is* /workspace. Without this, every round's `git add -A` hashed tens of GB
+# of weights onto the slow network volume — a ~48-min silent stall per round.
+ollama-data/
 .droplet_id
 .droplet_ip
 .pod_id
@@ -16,3 +20,4 @@ data/val/*/
 data/test/*/
 .venv/
 secrets/
+logs/

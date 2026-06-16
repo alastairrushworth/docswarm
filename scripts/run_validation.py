@@ -140,6 +140,22 @@ def _git(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.Complet
     return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True)
 
 
+def _ensure_git_identity(cfg: dict) -> None:
+    """Fresh pods have no git identity, so every per-round `git commit` died with
+    `Author identity unknown` (exit 128) and no round progress was persisted.
+    Set a repo-local identity (configurable via config.repo) if unset."""
+    repo = cfg.get("repo", {})
+    name = repo.get("git_user_name", "docswarm-agent")
+    email = repo.get("git_user_email", "agent@docswarm.local")
+    try:
+        if not _git("config", "user.email", check=False).stdout.strip():
+            _git("config", "user.email", email)
+        if not _git("config", "user.name", check=False).stdout.strip():
+            _git("config", "user.name", name)
+    except subprocess.CalledProcessError as e:
+        logger.warning("could not set git identity: %s", e)
+
+
 def _commit_and_push(cfg: dict, message: str) -> None:
     branch = cfg.get("repo", {}).get("branch", "agent")
     try:
@@ -368,7 +384,15 @@ def _run_developer_agent(
         "--permission-mode", "bypassPermissions",
         "--model", model,
     ]
-    rc = subprocess.run(cmd, cwd=ROOT, check=False, input=prompt, text=True).returncode
+    # The pod runs as root, where Claude Code refuses bypassPermissions
+    # ("--dangerously-skip-permissions cannot be used with root/sudo privileges")
+    # and exits 1 before doing anything — silently turning every round into a
+    # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
+    # containers like this ephemeral pod.
+    env = {**os.environ, "IS_SANDBOX": "1"}
+    rc = subprocess.run(
+        cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
+    ).returncode
     if rc != 0:
         logger.warning("claude exited with code %d", rc)
 
@@ -384,6 +408,7 @@ def main() -> int:
     cfg = _load_cfg()
     if not args.no_git:
         _ensure_git_ssh(cfg)
+        _ensure_git_identity(cfg)
     iter_cfg = cfg.get("iteration", {})
     wall_clock_s = float(iter_cfg.get("wall_clock_hours", 12)) * 3600
     epsilon = float(iter_cfg.get("epsilon", 0.005))

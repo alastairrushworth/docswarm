@@ -63,9 +63,17 @@ def _embed_cooldown() -> float:
     return float(get("judge.embed_cooldown_seconds", 60.0))
 
 
+def _embed_max_chars() -> int:
+    # nomic-embed-text 500s on inputs over the physical batch size (2048 tokens):
+    # "input (N tokens) is too large to process". A single oversized field then
+    # tripped the 60s cooldown below and forced jaccard for *every* text. Cap the
+    # input well under that limit (~4 chars/token) so embeddings stay available.
+    return int(get("judge.embed_max_chars", 6000))
+
+
 def _embed(text: str) -> tuple[float, ...] | None:
     global _embed_blocked_until
-    text = (text or "").strip()
+    text = (text or "").strip()[: _embed_max_chars()]
     if not text:
         return None
     hit = _embed_cache.get(text)
