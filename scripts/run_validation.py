@@ -165,7 +165,17 @@ def _commit_and_push(cfg: dict, message: str) -> None:
             logger.info("nothing to commit")
             return
         _git("commit", "-m", message)
-        _git("push", "origin", branch, check=False)
+        # Push failures were silently swallowed (check=False, stderr discarded),
+        # so a non-pushing pod looked healthy while origin/development drifted and
+        # the *next* pod's `git pull --ff-only` aborted on divergence. Surface it.
+        push = _git("push", "origin", branch, check=False)
+        if push.returncode != 0:
+            logger.warning(
+                "git push to origin/%s failed (rc=%d): %s",
+                branch, push.returncode, (push.stderr or push.stdout).strip(),
+            )
+        else:
+            logger.info("pushed commit to origin/%s", branch)
     except subprocess.CalledProcessError as e:
         logger.warning("git operation failed: %s\n%s", e, e.stderr)
 
