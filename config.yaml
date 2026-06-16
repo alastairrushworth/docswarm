@@ -96,7 +96,11 @@ judge:
 # ----- Single Ollama instance shared by translator + agent + judge -----
 ollama:
   url:                "http://localhost:11434"
-  num_parallel:       4                  # OLLAMA_NUM_PARALLEL on the server
+  # KV cache reserved per loaded model = context_length x num_parallel. At 64k x 4
+  # the coder's reload to serve Claude Code reserved ~60 GB and OOM'd the 80 GB A100
+  # mid-load (SSH reset, pod torn down). num_parallel=2 -> ~30 GB KV + ~20 GB weights
+  # fits with margin, while keeping 2x parallelism for the per-page vision pass.
+  num_parallel:       2                  # OLLAMA_NUM_PARALLEL on the server
   max_loaded_models:  3                  # qwen3.6:35b (coder+vision+judge) + embedding
   keep_alive:         "24h"
   context_length:     65536              # Claude Code requires ≥64k
