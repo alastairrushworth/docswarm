@@ -8,10 +8,16 @@ runpod:
   # API key: export RUNPOD_API_KEY=<key>  (do not store here)
   # Check GPU availability and find your datacenter_id at:
   #   https://www.runpod.io/gpu-instance/pricing
+  # All >=80GB VRAM — anything smaller OOMs (see comment ~line 100). Tried in
+  # order, so the cheaper 80GB cards come first; the 94/141GB cards are headroom
+  # fallbacks that widen availability when the 80GB pool is empty.
   gpu_type_ids:
     - "NVIDIA H100 80GB HBM3"
     - "NVIDIA H100 PCIe"
     - "NVIDIA A100-SXM4-80GB"
+    - "NVIDIA A100 80GB PCIe"
+    - "NVIDIA H100 NVL"
+    - "NVIDIA H200"
   image:             "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
   container_disk_gb: 50
   volume_size_gb:    600        # network volume for /workspace (repo + Ollama model cache)
