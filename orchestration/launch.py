@@ -331,11 +331,16 @@ def up() -> int:
             "pip install --quiet --upgrade "
             "'pydantic>=2.6' 'pyyaml>=6.0' 'pymupdf>=1.24' 'Pillow>=10.0' "
             "'httpx>=0.27' 'numpy>=1.26' 'scipy>=1.11' 'pytest>=8.0'; "
-            # An interrupted prior run (Ctrl-C mid commit/push) can leave a stale
-            # .git/index.lock on the persistent volume, which blocks all git ops on
-            # the next pod. The pod is fresh, so no live git process owns it — clear it.
+            # The persistent /workspace volume can carry git cruft from prior pods:
+            #  - a stale .git/index.lock (interrupted commit/push) that blocks git ops;
+            #  - a divergent unpushed commit (a round whose push failed), which makes
+            #    `git pull --ff-only` abort with "Not possible to fast-forward" and
+            #    bricks every subsequent run.
+            # origin is the source of truth (launch.py pushes laptop->origin above and
+            # the agent pushes its work to origin each round), so hard-reset the volume
+            # to origin/<branch> — same clean-mirror semantics as setup.sh's clone path.
             f"cd /workspace && rm -f .git/index.lock && git fetch origin && "
-            f"git checkout {branch} && git pull --ff-only"
+            f"git checkout {branch} && git reset --hard origin/{branch}"
         )
         rc = _ssh_run(ip, port, bootstrap)
         if rc != 0:

@@ -45,10 +45,13 @@ sort -u /root/.ssh/known_hosts -o /root/.ssh/known_hosts
 
 # 5. Clone repo to /workspace (idempotent)
 if [[ -d /workspace/.git ]]; then
-    log "/workspace already a git repo; fetching latest"
+    log "/workspace already a git repo; resetting to origin/$REPO_BRANCH"
+    # Hard-reset rather than --ff-only: the volume can carry a divergent unpushed
+    # commit from a prior pod, which would make ff-only abort and brick the run.
+    # origin is the source of truth, so mirror it (matches the clone path below).
     git -C /workspace fetch origin
     git -C /workspace checkout "$REPO_BRANCH"
-    git -C /workspace pull --ff-only
+    git -C /workspace reset --hard "origin/$REPO_BRANCH"
 else
     log "cloning $REPO_URL ($REPO_BRANCH) → /workspace"
     # git clone refuses a non-empty target; init+fetch handles that case too
