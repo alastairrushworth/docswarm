@@ -104,9 +104,14 @@ ollama:
   url:                "http://localhost:11434"
   # KV cache reserved per loaded model = context_length x num_parallel. At 64k x 4
   # the coder's reload to serve Claude Code reserved ~60 GB and OOM'd the 80 GB A100
-  # mid-load (SSH reset, pod torn down). num_parallel=2 -> ~30 GB KV + ~20 GB weights
-  # fits with margin, while keeping 2x parallelism for the per-page vision pass.
-  num_parallel:       2                  # OLLAMA_NUM_PARALLEL on the server
+  # mid-load (SSH reset, pod torn down).
+  #
+  # All models are qwen3.6:35b (qwen35moe), whose architecture "does not currently
+  # support parallel requests" (Ollama WARN). With num_parallel>1 Ollama thrashed:
+  # it reloaded the 35B model 7+ times during a single agent round (~25 of 30 min
+  # wasted) and double-reserved KV cache for slots the MoE can't use. =1 matches
+  # the model's real capability, ends the reload thrash, and halves KV reservation.
+  num_parallel:       1                  # OLLAMA_NUM_PARALLEL on the server
   max_loaded_models:  3                  # qwen3.6:35b (coder+vision+judge) + embedding
   keep_alive:         "24h"
   context_length:     65536              # Claude Code requires ≥64k

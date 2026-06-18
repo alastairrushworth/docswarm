@@ -399,7 +399,18 @@ def _run_developer_agent(
     # and exits 1 before doing anything — silently turning every round into a
     # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
     # containers like this ephemeral pod.
-    env = {**os.environ, "IS_SANDBOX": "1"}
+    #
+    # The coder can emit a very long single response (large file rewrites). Claude
+    # Code's default 32k output-token cap then aborts the turn with
+    # "API Error: ... exceeded the 32000 output token maximum" (exit 1) — another
+    # silent no-op (observed: Δ+0.000 every round). Raise the cap so the agent can
+    # finish its edit. If it still trips, the model is over-generating and the
+    # prompt needs tightening rather than a higher cap.
+    env = {
+        **os.environ,
+        "IS_SANDBOX": "1",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+    }
     rc = subprocess.run(
         cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
     ).returncode
