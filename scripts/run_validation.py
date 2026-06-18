@@ -400,16 +400,19 @@ def _run_developer_agent(
     # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
     # containers like this ephemeral pod.
     #
-    # The coder can emit a very long single response (large file rewrites). Claude
-    # Code's default 32k output-token cap then aborts the turn with
-    # "API Error: ... exceeded the 32000 output token maximum" (exit 1) — another
-    # silent no-op (observed: Δ+0.000 every round). Raise the cap so the agent can
-    # finish its edit. If it still trips, the model is over-generating and the
-    # prompt needs tightening rather than a higher cap.
+    # The coder (qwen3.6:35b) is a reasoning model: left to think it pours a
+    # runaway chain-of-thought into the response and blows Claude Code's output
+    # cap — even at 64k (observed: "exceeded the 64000 output token maximum",
+    # exit 1, Δ+0.000 every round, no edit made). MAX_THINKING_TOKENS=0 is Claude
+    # Code's switch to disable extended thinking so the coder emits its edit
+    # directly — the same fix vision_think=false applies on the vision path, which
+    # can't reach here because the coder goes via Ollama's Anthropic-compatible
+    # endpoint (no native `think` param). The 64k output cap stays as a backstop.
     env = {
         **os.environ,
         "IS_SANDBOX": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+        "MAX_THINKING_TOKENS": "0",
     }
     rc = subprocess.run(
         cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
