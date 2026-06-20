@@ -41,7 +41,7 @@ from .schema import Article, Cost, Document, Issue, MagazineMeta, Publisher
 
 logger = logging.getLogger("pdf_to_json")
 
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
 # --------------------------------------------------------------------------- #
 # Prompts
@@ -55,26 +55,37 @@ cannot identify:
 
 {
   "editor":       "Full name, exactly as printed",
-  "volume":       "Raw text from the page (e.g. 'CI' or '5')",
-  "number":       "Raw text from the page (e.g. '2630')",
-  "date":         "Any date phrase you see (e.g. 'June 25, 1941')",
-  "publisher_name":     "Publisher / company name",
-  "publisher_address":  "Full address or city/region",
+  "volume_raw":   "Raw text from the page next to the word 'Vol' or 'Volume'.\
+ May be Roman numerals (e.g. 'CI', 'V') or Arabic (e.g. '5'). Keep EXACTLY what\
+ is on the page.",
+  "number_raw":   "Raw text of the issue/edition number (e.g. '2630'). Found next\
+ to the word 'No.' or 'Number' or on its own near volume info.",
+  "date_raw":     "Complete date phrase you see (e.g. 'June 25, 1941'), including\
+ day/month/year exactly as printed.",
+  "publisher_name":     "Publisher / company name ONLY — the business name,\
+ NOT any address or location info after it.",
+  "publisher_address":  "Full address line(s) for the publisher. If you see\
+ 'Bowling Green Lane, London' that is an address, not a name. Put only address\
+ info here.",
   "cost_issue":     "Price per single copy (e.g. '3d', '$0.25')",
   "cost_annual":    "Annual subscription price, null if not listed",
   "cost_semiannual": "Six-month price, null if not listed"
 }
 
 RULES:
-- Keep volume and number as raw strings from the page (do NOT convert Roman to
-  Arabic yourself — let the parser handle it).
-- If publisher name and address are on one line separated by a comma, split them
-  into separate fields using your best judgment.
+- EXACTLY as printed — do NOT convert Roman numerals yourself, do NOT remove\
+ punctuation. If you see 'CI', return 'CI'.
+- Publisher name vs address: the COMPANY NAME is the publisher_name; any street,\
+ city, region info is publisher_address. If unsure about where to split on a\
+ comma-separated line, put everything in publisher_name and leave address empty —\
+ we will parse it later.
+- date_raw must include ALL parts (day + month + year) you can see. Do NOT drop\
+ the year.
 """
 
 _BODY_PROMPT = """\
 You are reading a single scanned page of a vintage cycling magazine.
-This is NOT the first page (page 0).  Return ONLY a JSON object:
+Return ONLY a JSON object:
 
 {
   "article_starts": [
@@ -181,9 +192,10 @@ def _vision_call(
 
 def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
     """Convert raw masthead JSON into schema MagazineMeta."""
-    vol_raw = masthead_raw.get("volume") or ""
-    num_raw = masthead_raw.get("number") or ""
-    date_raw = masthead_raw.get("date")
+    # Support both old (volume/number/date) and new-style (volume_raw/number_raw/date_raw)
+    vol_raw = masthead_raw.get("volume_raw") or masthead_raw.get("volume") or ""
+    num_raw = masthead_raw.get("number_raw") or masthead_raw.get("number") or ""
+    date_raw = masthead_raw.get("date_raw") or masthead_raw.get("date")
 
     vol_val = parse_volume(str(vol_raw)) if vol_raw else None
     num_val = parse_number(str(num_raw)) if num_raw else None

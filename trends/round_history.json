@@ -1357,5 +1357,149 @@
         ]
       }
     ]
+  },
+  {
+    "round": 2,
+    "timestamp": "2026-06-20T14:14:49Z",
+    "wall_clock_seconds": 356.7,
+    "aggregate": 0.5444,
+    "components": {
+      "schema_validity": 0.5714,
+      "article_count": 0.24,
+      "precision": 0.24,
+      "metadata": 0.3333,
+      "titles": 0.7407,
+      "text": 0.9388,
+      "order": 0.5717,
+      "pages": 0.3389
+    },
+    "code_change": "module/pdf_to_json/masthead.py, module/pdf_to_json/pipeline.py (2 files changed, 61 insertions(+), 24 deletions(-))",
+    "model_loadout": "coder=qwen3.6:35b, vision=qwen3.6:35b, judge=qwen3.6:35b, embedding=nomic-embed-text",
+    "per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "aggregate": 0.5444
+      }
+    ],
+    "categorical_errors_per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "errors": [
+          {
+            "category": "extra_article",
+            "count": 38
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 5
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 5
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 15
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 15
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 19
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 19
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 23
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 23
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 24
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 24
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 26
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 26
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 30
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 30
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 33
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 33
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 35
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 36
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 36
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 37
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 37
+          },
+          {
+            "category": "wrong_kind",
+            "predicted_index": 40
+          },
+          {
+            "category": "page_number_wrong",
+            "predicted_index": 40
+          }
+        ]
+      }
+    ],
+    "hints_per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "hints": [
+          "Schema gaps in: magazine.editor, magazine.publisher.name, magazine.publisher.address. Ensure each is present and of the correct type per schema.py.",
+          "You produced 38 more article(s) than expected. Investigate over-segmentation: ads, mastheads, standing departments, or a single piece split at sub-headings may be counted as separate articles.",
+          "38 of 50 predicted article(s) matched nothing expected (precision 0.24). These phantom articles now cost aggregate score directly. Tighten segmentation so ads, mastheads, standing departments and sub-headed fragments are not emitted as separate articles.",
+          "Metadata 'editor' is not populated \u2014 locate and extract it.",
+          "Metadata 'issue.date' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "Metadata 'issue.volume' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "Metadata 'issue.number' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "4 of 12 aligned title(s) diverge from expected. Common causes: dropping/adding a leading article, including or omitting a subtitle, or capturing a section/department header instead of the article title.",
+          "Reading order diverges (order score 0.57). Re-check the multi-column reading sequence and where continued articles are placed relative to items that start later.",
+          "Some page assignments differ from expected. Re-check continuation page handling and the page-numbering convention."
+        ]
+      }
+    ]
   }
 ]

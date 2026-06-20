@@ -147,30 +147,55 @@ def parse_number(raw: str) -> int | None:
 # --------------------------------------------------------------------------- #
 
 def extract_masthead(raw: str) -> dict[str, Any]:
-    """Parse the vision model's raw masthead response into a metadata dict."""
+    """Parse the vision model's raw masthead response into a metadata dict.
+
+    Handles both old-style fields (volume/number/date) and new-style
+    (volume_raw/number_raw/date_raw). Also supports publisher_full_line for
+    cases where name+address were not separated by the vision model.
+    """
     data = _try_json(raw)
     if not data:
         return {}
 
     result: dict[str, Any] = {}
 
-    for key in ("editor", "volume", "number", "date",
-                "cost_issue", "cost_annual", "cost_semiannual"):
+    # Editor
+    val = _str(data.get("editor"))
+    if val:
+        result["editor"] = val
+
+    # Volume — try new-style first, fall back to old
+    vol_raw = _str(data.get("volume_raw")) or _str(data.get("volume"))
+    if vol_raw:
+        result["volume_raw"] = vol_raw
+
+    # Number — try new-style first, fall back to old
+    num_raw = _str(data.get("number_raw")) or _str(data.get("number"))
+    if num_raw:
+        result["number_raw"] = num_raw
+
+    # Date — try new-style first, fall back to old
+    date_raw = _str(data.get("date_raw")) or _str(data.get("date"))
+    if date_raw:
+        result["date_raw"] = date_raw
+
+    # Cost fields
+    for key in ("cost_issue", "cost_annual", "cost_semiannual"):
         val = _str(data.get(key))
         if val:
             result[key] = val
 
     # Publisher fields — two patterns: separate name/address OR full_line.
-    raw_name = data.get("publisher_name", "")
-    raw_addr = data.get("publisher_address", "")
-    full_line = _str(data.get("publisher_full_line")) or _str(raw_name)
+    raw_name = _str(data.get("publisher_name")) or ""
+    raw_addr = _str(data.get("publisher_address")) or ""
+    full_line = _str(data.get("publisher_full_line")) or raw_name
 
-    if isinstance(raw_name, str) and raw_name.strip():
+    if raw_name:
         result["publisher_name"] = raw_name.strip()
-    if isinstance(raw_addr, str) and raw_addr.strip():
+    if raw_addr:
         result["publisher_address"] = raw_addr.strip()
-    elif full_line and "," in _str(full_line):
-        name, addr = parse_publisher_from_full_line(_str(full_line))
+    elif full_line and "," in full_line:
+        name, addr = parse_publisher_from_full_line(full_line)
         if name and not result.get("publisher_name"):
             result["publisher_name"] = name
         if addr and not result.get("publisher_address"):
