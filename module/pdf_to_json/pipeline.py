@@ -372,6 +372,16 @@ def pdf_to_json(pdf_path: str) -> dict:
                 think=vision_think,
             )
             masthead_raw = _parse_json(mh_response)
+            # Process raw masthead data through extract_masthead for proper parsing
+            if masthead_raw:
+                from .masthead import extract_masthead
+                processed_masthead = extract_masthead(str(masthead_raw))
+                # Merge with any existing extracted fields, favoring new structure
+                for key in ["editor", "volume_raw", "number_raw", "date_raw",
+                           "publisher_name", "publisher_address", "cost_issue",
+                           "cost_annual", "cost_semiannual"]:
+                    if key in processed_masthead and not masthead_raw.get(key):
+                        masthead_raw[key] = processed_masthead[key]
             logger.info("masthead extraction: %s", {k: str(v)[:80] for k, v in (masthead_raw or {}).items()})
 
         # === PASS 2: Article starts on all pages ===
@@ -423,13 +433,16 @@ def pdf_to_json(pdf_path: str) -> dict:
         doc_pages: list[int] = list(range(1, n_pages + 1))
 
         # Gather all article starts with their source page index
+        # NO filtering at this stage - let consolidate.consolidate() handle sophisticated noise filtering
         all_starts: list[dict[str, Any]] = []
         for page_idx in sorted(results):
             page_ir = results[page_idx]
             articles_list = page_ir.get("article_starts") or []
             for art in articles_list:
+                title = art.get("title", "")
+
                 all_starts.append({
-                    "title": art.get("title", ""),
+                    "title": title,
                     "kind": art.get("kind", "prose"),
                     "text_chunks": art.get("text_chunks") or [],
                     "page_index": page_idx,
