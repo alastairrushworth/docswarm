@@ -90,7 +90,7 @@ def _submit_broad(cfg: dict, pdf_id: str, round_n: int, prediction: dict) -> dic
 def _aggregate_per_pdf(feedbacks: list[dict]) -> dict[str, Any]:
     aggs = [f.get("aggregate", 0.0) for f in feedbacks]
     avg = sum(aggs) / len(aggs) if aggs else 0.0
-    component_keys = ["schema_validity", "article_count", "metadata", "titles", "text", "order", "pages"]
+    component_keys = ["schema_validity", "article_count", "precision", "metadata", "titles", "text", "order", "pages"]
     components: dict[str, float] = {}
     for k in component_keys:
         vals = [(f.get("components") or {}).get(k, {}).get("score", 0.0) for f in feedbacks]
@@ -140,6 +140,47 @@ def _git(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.Complet
     return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True)
 
 
+_NO_CHANGE = "(no code changes)"
+
+
+def _code_change_summary() -> str:
+    """One-line summary of the agent's uncommitted edits to the deliverable since
+    the last round's commit. Recorded into the trend so the agent SEES that its
+    rewrites moved (or, as has been the case, did not move) the score — the
+    cross-round signal that breaks the Groundhog-Day loop where it re-derived the
+    same edit every round with no memory of the last attempt's null result."""
+    try:
+        diff = _git("diff", "--stat", "HEAD", "--", "module/pdf_to_json", check=False).stdout.strip()
+    except Exception:
+        return _NO_CHANGE
+    if not diff:
+        return _NO_CHANGE
+    # Keep the compact files-changed / insertions / deletions summary line.
+    last = diff.splitlines()[-1].strip()
+    files = [ln.split("|")[0].strip() for ln in diff.splitlines()[:-1] if "|" in ln]
+    head = ", ".join(files[:4]) + (" …" if len(files) > 4 else "")
+    return f"{head} ({last})" if head else last
+
+
+def _invalidate_vision_cache(cfg: dict) -> int:
+    """Delete the persistent per-page vision cache so the next translation reflects
+    the agent's code/prompt edits. The cache lives on the network volume and at
+    temperature=0 returns byte-identical pages, which silently masked every agent
+    change for 9 rounds across 3 runs. Cleared only when code actually changed, so
+    unchanged rounds still get the (correct, cheap) cache."""
+    cache_dir = Path(cfg.get("paths", {}).get("cache_dir", str(ROOT / ".cache/pdf_to_json")))
+    if not cache_dir.is_dir():
+        return 0
+    n = 0
+    for p in cache_dir.glob("*.json"):
+        try:
+            p.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
 def _ensure_git_identity(cfg: dict) -> None:
     """Fresh pods have no git identity, so every per-round `git commit` died with
     `Author identity unknown` (exit 128) and no round progress was persisted.
@@ -185,6 +226,7 @@ def _component_short(entry: dict) -> str:
     return (
         f"titles {c['titles']:.2f}, text {c['text']:.2f}, order {c['order']:.2f}, "
         f"meta {c['metadata']:.2f}, count {c['article_count']:.2f}, "
+        f"prec {c.get('precision', 0.0):.2f}, "
         f"schema {c['schema_validity']:.2f}, pages {c['pages']:.2f}"
     )
 
@@ -215,6 +257,15 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
 
     pdf_concurrency = max(1, int(cfg.get("iteration", {}).get("pdf_concurrency", 1)))
 
+    # The agent has just edited the deliverable (round > 1). If it changed
+    # anything, bust the persistent vision cache so this round's translation
+    # actually reflects the edit — otherwise temp=0 cache hits freeze the output.
+    code_change = _code_change_summary()
+    if code_change != _NO_CHANGE:
+        cleared = _invalidate_vision_cache(cfg)
+        logger.info("round %d: deliverable changed [%s] — cleared %d cached page(s)",
+                    round_n, code_change, cleared)
+
     t0 = time.monotonic()
     feedbacks_by_pdf: dict[str, dict] = {}
 
@@ -238,6 +289,7 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
         "wall_clock_seconds": round(elapsed, 1),
         "aggregate": round(agg["aggregate"], 4),
         "components": {k: round(v, 4) for k, v in agg["components"].items()},
+        "code_change": code_change,
         "model_loadout": _model_loadout(cfg),
         "per_pdf": [
             {"pdf_id": _pdf_id(p), "aggregate": fb.get("aggregate", 0.0)}
@@ -274,14 +326,21 @@ def _trend_summary(cfg: dict) -> str:
     except json.JSONDecodeError:
         return "(trend file unreadable)"
     lines = []
+    prev_agg = None
     for e in history:
         c = e.get("components", {})
+        agg = e.get("aggregate", 0.0)
+        delta = f" Δ{agg - prev_agg:+.3f}" if prev_agg is not None else ""
+        prev_agg = agg
+        change = e.get("code_change")
+        change_str = f"  ← changed {change}{delta}" if change and change != _NO_CHANGE else ""
         lines.append(
-            f"  round {e.get('round')}: agg={e.get('aggregate', 0.0):.3f} "
+            f"  round {e.get('round')}: agg={agg:.3f} "
             f"[titles {c.get('titles', 0.0):.2f}, text {c.get('text', 0.0):.2f}, "
             f"order {c.get('order', 0.0):.2f}, meta {c.get('metadata', 0.0):.2f}, "
-            f"count {c.get('article_count', 0.0):.2f}, schema {c.get('schema_validity', 0.0):.2f}, "
-            f"pages {c.get('pages', 0.0):.2f}]"
+            f"count {c.get('article_count', 0.0):.2f}, prec {c.get('precision', 0.0):.2f}, "
+            f"schema {c.get('schema_validity', 0.0):.2f}, pages {c.get('pages', 0.0):.2f}]"
+            f"{change_str}"
         )
     return "\n".join(lines) if lines else "(no rounds graded yet)"
 
@@ -312,8 +371,32 @@ def _best_status(prev_entry: dict, best_entry: dict | None) -> str:
     )
 
 
+def _plateau_directive(rounds_since_best: int) -> str:
+    """Escalation injected when the aggregate has stalled. The agent has been
+    re-deriving the same incremental edit each round (Δ0.000) with no memory of
+    the prior null result; this forces an approach change and a train-score check
+    that the edit actually alters output before it is committed."""
+    if rounds_since_best < 2:
+        return ""
+    return (
+        f"\n*** PLATEAU: {rounds_since_best} round(s) with no aggregate improvement. ***\n"
+        "Your recent edits (see the 'changed …' annotations in the trajectory) did NOT move "
+        "the score. Do not make another incremental edit to the same code path — that has "
+        "repeatedly produced Δ0.000. Instead:\n"
+        "  1. Pick the SINGLE weakest component from the trajectory.\n"
+        "  2. Change the APPROACH wholesale, not the wording — e.g. replace the regex noise "
+        "filter with a different segmentation strategy; change how/where the masthead region "
+        "is located and parsed; or correct a systematic page-numbering offset.\n"
+        "  3. Run `python scripts/score_train.py` and CONFIRM the train self-score changed "
+        "before committing. An identical train score means your edit had no effect and will "
+        "plateau again — keep iterating until output actually moves.\n"
+        "  4. Record the new hypothesis explicitly in your notes so you do not repeat this.\n"
+    )
+
+
 def _developer_agent_prompt(
-    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None
+    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None,
+    rounds_since_best: int = 0,
 ) -> str:
     components = prev_entry.get("components", {})
     per_pdf = prev_entry.get("per_pdf", [])
@@ -322,6 +405,7 @@ def _developer_agent_prompt(
     notes = _read_notes(cfg)
     history = _trend_summary(cfg)
     best_status = _best_status(prev_entry, best_entry)
+    directive = _plateau_directive(rounds_since_best)
     notes_path = cfg.get("paths", {}).get("notes_file", "notes/approach.md")
     return f"""You are the developer agent for docswarm. This is round {round_n}.
 
@@ -341,7 +425,7 @@ Score trajectory so far:
 {history}
 
 {best_status}
-
+{directive}
 Latest round ({round_n - 1}) detail:
 - aggregate (weighted mean across val PDFs): {prev_entry.get('aggregate', 0.0):.3f}
 - components: {json.dumps(components)}
@@ -381,14 +465,17 @@ mounted. (Train truth is fair game — that is what `score_train.py` uses.)
 
 
 def _run_developer_agent(
-    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None
+    cfg: dict, round_n: int, prev_entry: dict, best_entry: dict | None,
+    rounds_since_best: int = 0,
 ) -> None:
     if shutil.which("claude") is None:
         logger.warning("claude CLI not on PATH; skipping developer-agent turn")
         return
-    model = cfg.get("models", {}).get("coder", "qwen3.6:35b")
-    prompt = _developer_agent_prompt(cfg, round_n, prev_entry, best_entry)
-    logger.info("round %d: invoking Claude Code (model=%s)", round_n, model)
+    models = cfg.get("models", {})
+    model = models.get("coder", "qwen3.6:35b")
+    provider = str(models.get("coder_provider", "ollama")).lower()
+    prompt = _developer_agent_prompt(cfg, round_n, prev_entry, best_entry, rounds_since_best)
+    logger.info("round %d: invoking Claude Code (model=%s, provider=%s)", round_n, model, provider)
     cmd = [
         "claude", "--print",
         "--permission-mode", "bypassPermissions",
@@ -398,22 +485,23 @@ def _run_developer_agent(
     # ("--dangerously-skip-permissions cannot be used with root/sudo privileges")
     # and exits 1 before doing anything — silently turning every round into a
     # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
-    # containers like this ephemeral pod.
-    #
-    # The coder (qwen3.6:35b) is a reasoning model: left to think it pours a
-    # runaway chain-of-thought into the response and blows Claude Code's output
-    # cap — even at 64k (observed: "exceeded the 64000 output token maximum",
-    # exit 1, Δ+0.000 every round, no edit made). MAX_THINKING_TOKENS=0 is Claude
-    # Code's switch to disable extended thinking so the coder emits its edit
-    # directly — the same fix vision_think=false applies on the vision path, which
-    # can't reach here because the coder goes via Ollama's Anthropic-compatible
-    # endpoint (no native `think` param). The 64k output cap stays as a backstop.
+    # containers like this ephemeral pod. The 64k output cap stays as a backstop.
     env = {
         **os.environ,
         "IS_SANDBOX": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
-        "MAX_THINKING_TOKENS": "0",
     }
+    if provider != "anthropic":
+        # Local coder (qwen3.6:35b) is a reasoning model: left to think it pours a
+        # runaway chain-of-thought into the response and blows the output cap
+        # (observed "exceeded the 64000 output token maximum", exit 1, Δ+0.000,
+        # no edit made). MAX_THINKING_TOKENS=0 disables extended thinking so it
+        # emits the edit directly — the analogue of vision_think=false, which it
+        # can't use because the coder goes via Ollama's Anthropic-compatible
+        # endpoint (no native `think` param). A real Claude model (provider
+        # "anthropic") is capable of bounded thinking, so we leave it enabled and
+        # rely on the ANTHROPIC_* env launch.py sets for the API route.
+        env["MAX_THINKING_TOKENS"] = "0"
     rc = subprocess.run(
         cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
     ).returncode
@@ -452,7 +540,7 @@ def main() -> int:
         round_n += 1
 
         if round_n > 1 and prev_entry is not None and not args.no_agent:
-            _run_developer_agent(cfg, round_n, prev_entry, best_entry)
+            _run_developer_agent(cfg, round_n, prev_entry, best_entry, rounds_since_best)
 
         entry = run_round(cfg, round_n)
         agg = entry["aggregate"]

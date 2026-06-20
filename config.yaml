@@ -39,6 +39,14 @@ models:
   vision:    "qwen3.6:35b"
   judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"       # ~270MB, similarity scoring
+  # The developer agent (Claude Code) role. A 35B local model drives the agentic
+  # tool loop poorly — observed exit-1 crashes and no-op rounds. Set
+  # coder_provider: "anthropic" and coder to a real Claude id (e.g.
+  # claude-sonnet-4-6 or claude-opus-4-8) to route ONLY the coder to the Claude
+  # API; vision/judge stay on local Ollama. Requires ANTHROPIC_API_KEY in .env or
+  # the environment. Costs real API spend per round. Default stays "ollama" so a
+  # run without a key still works.
+  coder_provider: "ollama"            # "ollama" (local) | "anthropic" (Claude API)
 
 # ----- Iteration control -----
 iteration:
@@ -66,14 +74,20 @@ iteration:
   plateau_window:             3
 
 # ----- Broad-mode scoring weights (sum to 1.0) -----
+# Rebalanced to put gradient where the headroom is. `text` was 0.30 while already
+# at 0.85 (weak signal); the broken components (precision/count/metadata/pages)
+# now carry more weight so fixing them actually moves the aggregate. `precision`
+# is new — it penalizes over-segmentation (phantom articles) that titles/text
+# could not see because they score matched pairs only.
 weights:
   schema_validity: 0.10
   article_count:   0.10
+  precision:       0.10
   metadata:        0.15
-  titles:          0.15
-  text:            0.30
-  order:           0.10
-  pages:           0.10
+  titles:          0.13
+  text:            0.22
+  order:           0.08
+  pages:           0.12
 
 # ----- Judge: non-leakage policy -----
 leakage:

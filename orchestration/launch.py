@@ -63,6 +63,21 @@ def _api_key() -> str:
     return key
 
 
+def _anthropic_key() -> str:
+    """ANTHROPIC_API_KEY from env or .env, for routing the coder role to the
+    Claude API (models.coder_provider: anthropic). Empty string if absent."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        env_file = ROOT / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    key = line.split("=", 1)[1].strip()
+                    break
+    return key
+
+
 # Datacenters tried in order when datacenter_id is not set or has no capacity.
 # List is all datacenters that support network volumes, US-first.
 _DC_FALLBACKS = [
@@ -358,6 +373,32 @@ def up() -> int:
             f"OLLAMA_CONTEXT_LENGTH={ollama_cfg.get('context_length', 65536)}"
         )
 
+        # Route the developer-agent (coder) role. Default: local Ollama via its
+        # Anthropic-compatible shim. When coder_provider == anthropic, point Claude
+        # Code at the real API instead (a 35B local model drives the agentic tool
+        # loop poorly — exit-1 crashes, no-op rounds). Only the coder is affected;
+        # vision/judge use OLLAMA_URL directly, not ANTHROPIC_*.
+        coder_provider = str(models_cfg.get("coder_provider", "ollama")).lower()
+        if coder_provider == "anthropic":
+            akey = _anthropic_key()
+            if not akey:
+                sys.exit(
+                    "config.models.coder_provider is 'anthropic' but ANTHROPIC_API_KEY is "
+                    "not set in the environment or .env. Add the key, or set coder_provider "
+                    "back to 'ollama'."
+                )
+            # Real Claude API: do NOT redirect ANTHROPIC_BASE_URL to the local shim.
+            # The key is embedded in the remote command (visible in the pod's process
+            # list) — acceptable for an ephemeral, single-tenant pod.
+            anthropic_env = f"ANTHROPIC_API_KEY={akey} "
+            print(f">>> coder routed to Claude API (model={coder_model})")
+        else:
+            anthropic_env = (
+                "ANTHROPIC_BASE_URL=http://localhost:11434 "
+                "ANTHROPIC_AUTH_TOKEN=ollama "
+                "ANTHROPIC_API_KEY= "
+            )
+
         # 3. Start Ollama + judge in background, run developer-agent in foreground.
         # Model weights persist on /workspace/ollama-data between runs.
         run_cmd = (
@@ -403,9 +444,7 @@ def up() -> int:
             "echo '>>> starting harness (run_validation.py)'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "
-            "ANTHROPIC_BASE_URL=http://localhost:11434 "
-            "ANTHROPIC_AUTH_TOKEN=ollama "
-            "ANTHROPIC_API_KEY= "
+            + anthropic_env +
             "PYTHONPATH=/workspace:/workspace/module "
             "python scripts/run_validation.py"
         )

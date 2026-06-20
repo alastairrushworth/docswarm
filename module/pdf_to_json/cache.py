@@ -19,6 +19,18 @@ def pdf_content_hash(pdf_path: str | Path) -> str:
     return h.hexdigest()
 
 
+def prompt_fingerprint(text: str) -> str:
+    """Stable content hash of a prompt for cache-keying.
+
+    Python's builtin ``hash()`` on strings is salted per-process (PYTHONHASHSEED),
+    so it produces a *different* key for the same prompt on every run — silently
+    re-extracting across runs and, worse, never busting when only the prompt
+    changes within a run. A content hash makes the cache key reflect the actual
+    prompt text, so any prompt edit is observed and any unchanged prompt reuses
+    the cache deterministically across runs."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def _cache_root() -> Path:
     root = Path(get("paths.cache_dir", ".cache/pdf_to_json"))
     root.mkdir(parents=True, exist_ok=True)

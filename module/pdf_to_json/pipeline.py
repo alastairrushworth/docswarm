@@ -145,8 +145,8 @@ def _vision_call(
     prompt_text: str,
 ) -> dict[str, Any]:
     """Single vision call with caching."""
-    key_parts = f"{pdf_hash}|{page_index}|model|{prompt_version}"
-    cached = cache.load(pdf_hash, page_index, model + "_" + prompt_version, str(hash(prompt_text)))
+    prompt_fp = cache.prompt_fingerprint(prompt_text)
+    cached = cache.load(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp)
     if cached is not None:
         logger.info("page %d: cache hit", page_index + 1)
         return cached
@@ -170,7 +170,7 @@ def _vision_call(
         return {}
 
     parsed = _parse_json(raw)
-    cache.store(pdf_hash, page_index, model + "_" + prompt_version, str(hash(prompt_text)), parsed)
+    cache.store(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp, parsed)
     return parsed
 
 

@@ -21,8 +21,9 @@ def main() -> int:
         return 0
     history = json.loads(p.read_text())
 
-    cols = ["schema_validity", "article_count", "metadata", "titles", "text", "order", "pages"]
-    short = {"schema_validity": "schema", "article_count": "count", "metadata": "meta"}
+    cols = ["schema_validity", "article_count", "precision", "metadata", "titles", "text", "order", "pages"]
+    short = {"schema_validity": "schema", "article_count": "count", "metadata": "meta",
+             "precision": "prec"}
     headers = ["Round", "Agg"] + [short.get(c, c) for c in cols] + ["Δ", "time"]
     print(" | ".join(f"{h:>6}" for h in headers))
     prev = None

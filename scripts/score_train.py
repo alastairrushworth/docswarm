@@ -37,7 +37,7 @@ except ImportError as e:  # pragma: no cover - surfaced to the user
         f"(PYTHONPATH includes repo root). Original error: {e}"
     )
 
-_COMPONENTS = ["schema_validity", "article_count", "metadata", "titles", "text", "order", "pages"]
+_COMPONENTS = ["schema_validity", "article_count", "precision", "metadata", "titles", "text", "order", "pages"]
 
 
 def _load_cfg() -> dict:

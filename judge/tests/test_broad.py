@@ -9,8 +9,8 @@ from judge import broad
 from judge.alignment import align_articles
 
 WEIGHTS = {
-    "schema_validity": 0.10, "article_count": 0.10, "metadata": 0.15,
-    "titles": 0.15, "text": 0.30, "order": 0.10, "pages": 0.10,
+    "schema_validity": 0.10, "article_count": 0.10, "precision": 0.10,
+    "metadata": 0.15, "titles": 0.13, "text": 0.22, "order": 0.08, "pages": 0.12,
 }
 BANDS = {"metadata": 0.90, "title": 0.85}
 FLOOR = 0.15
@@ -81,6 +81,36 @@ def test_alignment_floor_drops_unrelated_pairs():
     cats = {e["category"]: e.get("count") for e in res["categorical_errors"]}
     assert cats.get("missing_article") == 2
     assert cats.get("extra_article") == 1
+
+
+def test_precision_penalizes_phantom_articles():
+    # Over-segmentation: the two real articles plus four phantom ones (ads/noise
+    # that align to nothing). titles/text still look fine (matched pairs only),
+    # but precision must drop and a hint must flag it — without leaking truth.
+    truth = _truth()
+    pred = copy.deepcopy(truth)
+    for k in range(4):
+        pred["articles"].append(
+            {"title": f"Acme Cycle Co. {k}", "text": ["buy our spokes today"],
+             "pages": [9], "kind": "prose"}
+        )
+    res = _evaluate(pred, truth)
+    # 2 of 6 predicted articles match → precision 1/3.
+    assert abs(res["components"]["precision"]["score"] - 2 / 6) < 1e-6
+    # matched-pair components are unaffected by the phantoms.
+    assert res["components"]["titles"]["score"] == 1.0
+    assert any("precision" in h for h in res["hints"])
+    blob = " ".join(res["hints"])
+    for secret in ["Van Sicklen", "Plymouth", "Berger", "Both Were Pleased", "alpha beta"]:
+        assert secret not in blob
+
+
+def test_precision_perfect_when_no_extras():
+    truth = _truth()
+    pred = copy.deepcopy(truth)
+    res = _evaluate(pred, truth)
+    assert res["components"]["precision"]["score"] == 1.0
+    assert not any("precision" in h for h in res["hints"])
 
 
 def test_title_band_snaps_near_matches():

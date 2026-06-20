@@ -74,6 +74,22 @@ def _article_count(pred: dict[str, Any], truth: dict[str, Any]) -> tuple[float, 
     return 1.0 - abs(delta) / denom, delta
 
 
+def _precision_score(pred_articles: list[Any], matches: list[tuple[int, int, float]]) -> float:
+    """Fraction of *predicted* articles that aligned to a real one.
+
+    Low precision means over-segmentation — ads, mastheads, standing departments
+    or sub-headed fragments emitted as separate articles. This is the component
+    the metric was previously blind to: titles/text/order/pages score the matched
+    pairs only, so 49 phantom articles cost nothing there, and article_count
+    (a symmetric count-delta) under-weights it. Precision makes those false
+    positives cost aggregate score directly, creating the gradient to stop
+    over-segmenting."""
+    n_pred = len(pred_articles)
+    if n_pred == 0:
+        return 1.0  # no predictions → no false positives (recall is article_count's job)
+    return len({i for i, _, _ in matches}) / n_pred
+
+
 def _to_int(x: Any) -> int | None:
     if isinstance(x, bool):
         return None
@@ -302,6 +318,17 @@ def _component_hints(
             "skipped, or a continuation absorbed into the wrong article."
         )
 
+    # precision — over-segmentation made visible to the aggregate
+    prec = components.get("precision", {}).get("score", 1.0)
+    if prec < 0.95 and pred_articles:
+        n_extra = len(pred_articles) - len({i for i, _, _ in matches})
+        hints.append(
+            f"{n_extra} of {len(pred_articles)} predicted article(s) matched nothing expected "
+            f"(precision {prec:.2f}). These phantom articles now cost aggregate score directly. "
+            "Tighten segmentation so ads, mastheads, standing departments and sub-headed "
+            "fragments are not emitted as separate articles."
+        )
+
     # metadata, per field
     for f in per_field:
         if f["score"] >= 0.999:
@@ -404,10 +431,12 @@ def evaluate(
     n_articles = max(len(pred_articles), len(truth_articles), 1)
     order = _order_score(matches, n_articles)
     pages = _pages_score(matches, pred_articles, truth_articles)
+    precision = _precision_score(pred_articles, matches)
 
     components = {
         "schema_validity": {"score": schema},
         "article_count":   {"score": count_score, "delta": delta},
+        "precision":       {"score": precision},
         "metadata":        {"score": meta_score, "matched": matched, "total": total},
         "titles":          {"score": titles},
         "text":            {"score": text},
