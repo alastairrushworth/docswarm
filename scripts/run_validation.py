@@ -485,17 +485,17 @@ def _run_developer_agent(
     # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
     # containers like this ephemeral pod. The 64k output cap stays as a backstop.
     #
-    # The coder (qwen3.6:35b) runs on local Ollama and is a reasoning model: left
-    # to think it pours a runaway chain-of-thought into the response and blows the
-    # output cap (observed "exceeded the 64000 output token maximum", exit 1,
-    # Δ+0.000, no edit made). MAX_THINKING_TOKENS=0 disables extended thinking so
-    # it emits the edit directly — the analogue of vision_think=false on the
-    # vision path.
+    # MAX_THINKING_TOKENS bounds the coder's thinking budget. north-mini-code-1.0
+    # is built for interleaved thinking, so we enable it but cap it below the 64k
+    # output limit so a runaway chain can't overflow and abort the turn (the
+    # exit-1 seen with the general qwen coder, which rambled past the cap). 0
+    # disables thinking entirely.
+    think_budget = int(cfg.get("iteration", {}).get("coder_max_thinking_tokens", 32000))
     env = {
         **os.environ,
         "IS_SANDBOX": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
-        "MAX_THINKING_TOKENS": "0",
+        "MAX_THINKING_TOKENS": str(think_budget),
     }
     rc = subprocess.run(
         cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
