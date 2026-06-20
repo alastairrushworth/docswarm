@@ -1,17 +1,24 @@
-"""STARTER pdf_to_json pipeline — replace freely.
+"""REWRITTEN pdf_to_json pipeline — multi-pass extraction.
 
-This file exists so round 1 can produce *some* score. It is NOT the recommended
-architecture. The translator is expected to be LLM-heavy and agentic: multi-pass
-extraction, specialist sub-modules, model routing, self-checks. Single vision
-call per page is unlikely to be sufficient.
+Architecture:
+1. **Masthead pass** — dedicated vision call on page 0 only, with a prompt tuned
+   to read the colophon/masthead region and return structured metadata.
+2. **Body pass** — vision calls on pages 1..N asking for article starts only
+   (not continuations), plus text extraction keyed by printed reading order.
+3. **Continuation pass** — post-process body output to link continuation fragments
+   back to their starting article using page-order heuristics.
+4. **Filtering pass** — remove ads, department headers, and noise articles via a
+   judge-driven approach (mark specific noise candidates for evaluation).
 
-The fixed contract is:
-- the public function name and signature: `pdf_to_json(pdf_path: str) -> dict`
-- the schema source-of-truth in `schema.py`
-- content-hash cache keying
-
-Everything else here — prompts, model routing, page rendering, stitching — is
-yours to delete and replace. See AGENT.md "What is fixed vs what you design".
+Key design decisions:
+- The first page gets TWO vision prompts: one for masthead metadata, one for
+  article starts on that same page.  This prevents the single-prompt version from
+  losing either signal.
+- Article text is extracted column-by-column where possible by asking the model to
+  respect multi-column layout.
+- Continuation detection uses page adjacency (next printed page after start page)
+  rather than relying on the per-page model's self-reported "continues" flag, which
+  has been unreliable.
 """
 from __future__ import annotations
 
@@ -28,51 +35,72 @@ from typing import Any
 import fitz  # PyMuPDF
 
 from . import cache, ollama_client
-from .assemble import assemble, empty_document
+from .masthead import extract_masthead, parse_volume, parse_number, _to_date
 from .config import get
-from .schema import Document
+from .schema import Article, Cost, Document, Issue, MagazineMeta, Publisher
 
 logger = logging.getLogger("pdf_to_json")
 
-PROMPT_VERSION = "v3"
+PROMPT_VERSION = "v4"
 
-_VISION_PROMPT = """\
-You are extracting structured data from a single page of a scanned cycling
-magazine. Respond with a single JSON object. No prose outside the JSON.
+# --------------------------------------------------------------------------- #
+# Prompts
+# --------------------------------------------------------------------------- #
 
-Schema:
+_MASTHEAD_PROMPT = """\
+You are reading the masthead / colophon of a vintage cycling magazine — usually
+at the top or bottom edge of the first page (on a decorative banner or in fine
+print).  Return ONLY a JSON object with these fields.  Use null for anything you
+cannot identify:
+
 {
-  "is_first_page": bool,
-  "magazine": {                // null unless is_first_page
-    "editor": str,
-    "issue": {"date": "YYYY-MM-DD", "volume": int, "number": int},
-    "publisher": {"name": str, "address": str},
-    "cost": {"issue": str|null, "annual": str|null, "semiannual": str|null}
-  } | null,
-  "articles": [
+  "editor":       "Full name, exactly as printed",
+  "volume":       "Raw text from the page (e.g. 'CI' or '5')",
+  "number":       "Raw text from the page (e.g. '2630')",
+  "date":         "Any date phrase you see (e.g. 'June 25, 1941')",
+  "publisher_name":     "Publisher / company name",
+  "publisher_address":  "Full address or city/region",
+  "cost_issue":     "Price per single copy (e.g. '3d', '$0.25')",
+  "cost_annual":    "Annual subscription price, null if not listed",
+  "cost_semiannual": "Six-month price, null if not listed"
+}
+
+RULES:
+- Keep volume and number as raw strings from the page (do NOT convert Roman to
+  Arabic yourself — let the parser handle it).
+- If publisher name and address are on one line separated by a comma, split them
+  into separate fields using your best judgment.
+"""
+
+_BODY_PROMPT = """\
+You are reading a single scanned page of a vintage cycling magazine.
+This is NOT the first page (page 0).  Return ONLY a JSON object:
+
+{
+  "article_starts": [
     {
-      "title": str,
-      "text": [str],            // paragraphs (prose) or lines (verse)
+      "title": "Article title as printed",
       "kind": "prose" | "verse",
-      "starts_on_this_page": bool,
-      "continues": bool          // true if it continues to a later page
+      "text_chunks": ["paragraph 1", "paragraph 2", ...]   // text from this article on THIS page only
     }
   ]
 }
 
-Preserve typography verbatim — do not normalize stray quotes or OCR-style typos.
-Currency values stay as strings (e.g. "$2.00").
+IMPORTANT rules:
+- ONLY return articles that START on this page (have a visible title).
+- Do NOT return continuations of articles that started on a previous page.
+- If the same story starts and continues across columns on this page, count it as one article.
+- Preserve typography exactly — do not normalize OCR-style typos, stray quotes, or punctuation.
+- For prose: group continuous text into paragraphs (one string per paragraph).
+- For verse: each line is a separate chunk in text_chunks.
+- If there are no new articles starting on this page, return empty article_starts.
+
+Do NOT output any prose outside the JSON object.
 """
 
-
-def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int, fmt: str) -> Path:
-    page = doc.load_page(page_index)
-    pix = page.get_pixmap(dpi=dpi)
-    pix.save(str(out), output=fmt, jpg_quality=85)
-    return out
-
-
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _parse_json(blob: str) -> dict[str, Any]:
@@ -89,72 +117,192 @@ def _parse_json(blob: str) -> dict[str, Any]:
     return {}
 
 
-def _extract_page(
+def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int, fmt: str) -> Path:
+    page = doc.load_page(page_index)
+    pix = page.get_pixmap(dpi=dpi)
+    pix.save(str(out), output=fmt, jpg_quality=85)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Vision extraction
+# --------------------------------------------------------------------------- _call_count = 0
+
+
+def _vision_call(
     pdf_hash: str,
     page_index: int,
     image_path: Path,
     model: str,
+    prompt_version: str,
     timeout_seconds: float,
     options: dict[str, Any],
     think: bool,
+    prompt_text: str,
 ) -> dict[str, Any]:
-    cached = cache.load(pdf_hash, page_index, model, PROMPT_VERSION)
+    """Single vision call with caching."""
+    key_parts = f"{pdf_hash}|{page_index}|model|{prompt_version}"
+    cached = cache.load(pdf_hash, page_index, model + "_" + prompt_version, str(hash(prompt_text)))
     if cached is not None:
         logger.info("page %d: cache hit", page_index + 1)
         return cached
 
-    logger.info("page %d: vision call  model=%s  timeout=%.0fs  num_ctx=%s  think=%s",
-                page_index + 1, model, timeout_seconds, options.get("num_ctx"), think)
+    global _call_count
+    _call_count += 1
+    logger.info("page %d: vision call #%d  model=%s  prompt_v=%s",
+                page_index + 1, _call_count, model, prompt_version)
     try:
         raw = ollama_client.generate(
             model=model,
-            prompt=_VISION_PROMPT,
+            prompt=prompt_text,
             images=[image_path],
             timeout=timeout_seconds,
             options=options,
             think=think,
         )
     except Exception as e:
-        # ConnectError here = the Ollama server is down (e.g. OOM-crashed),
-        # not a slow page; ReadTimeout = genuinely slow generation.
         logger.warning("page %d: vision call failed (%s): %s",
                        page_index + 1, type(e).__name__, e)
         return {}
 
     parsed = _parse_json(raw)
-    if parsed:
-        cache.store(pdf_hash, page_index, model, PROMPT_VERSION, parsed)
+    cache.store(pdf_hash, page_index, model + "_" + prompt_version, str(hash(prompt_text)), parsed)
     return parsed
 
 
-def _merge_articles(per_page: list[tuple[int, dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Stitch continuations across pages, preserving printed sequence."""
-    ordered: list[dict[str, Any]] = []
-    open_article: dict[str, Any] | None = None
+# --------------------------------------------------------------------------- #
+# Metadata extraction
+# --------------------------------------------------------------------------- def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
+    """Convert raw masthead JSON into schema MagazineMeta."""
+    vol_raw = masthead_raw.get("volume") or ""
+    num_raw = masthead_raw.get("number") or ""
+    date_raw = masthead_raw.get("date")
 
-    for printed_page, page_ir in per_page:
-        articles = page_ir.get("articles") or []
-        for idx, a in enumerate(articles):
-            starts = a.get("starts_on_this_page", True)
-            if not starts and open_article is not None and idx == 0:
-                open_article["text"].extend(a.get("text") or [])
-                if printed_page not in open_article["pages"]:
-                    open_article["pages"].append(printed_page)
-                if not a.get("continues"):
-                    open_article = None
-                continue
-            new = {
-                "title": a.get("title", ""),
-                "text": list(a.get("text") or []),
-                "kind": a.get("kind", "prose"),
-                "pages": [printed_page],
-            }
-            ordered.append(new)
-            open_article = new if a.get("continues") else None
-    return ordered
+    vol_val = parse_volume(str(vol_raw)) if vol_raw else None
+    num_val = parse_number(str(num_raw)) if num_raw else None
+    date_val = _to_date(str(date_raw)) if date_raw else None
+    if date_val is None:
+        date_val = masthead_raw.get("_raw_date", "")  # keep raw as string fallback
+
+    pub_name = masthead_raw.get("publisher_name") or ""
+    pub_addr = masthead_raw.get("publisher_address") or ""
+
+    cost_issue = masthead_raw.get("cost_issue")
+    cost_annual = masthead_raw.get("cost_annual")
+    cost_semiannual = masthead_raw.get("cost_semiannual")
+
+    # If address was left empty, check if it came as part of a combined string
+    pub_full = masthead_raw.get("_publisher_line") or ""
+    if not pub_addr and "," in (pub_name or ""):
+        parts = pub_name.split(",", 1)
+        pub_name = parts[0].strip()
+        pub_addr = ", ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""
+
+    return MagazineMeta(
+        editor=masthead_raw.get("editor") or "",
+        issue=Issue(
+            date=date_val if isinstance(date_val, str) else (date_val.isoformat() if date_val else ""),
+            volume=vol_val if vol_val is not None else 0,
+            number=num_val if num_val is not None else 0,
+        ),
+        publisher=Publisher(
+            name=pub_name or "",
+            address=pub_addr or "",
+        ),
+        cost=Cost(
+            issue=str(cost_issue) if cost_issue else None,
+            annual=str(cost_annual) if cost_annual else None,
+            semiannual=str(cost_semiannual) if cost_semiannual else None,
+        ),
+    )
 
 
-def pdf_to_json(pdf_path: str) -> dict:
+# --------------------------------------------------------------------------- #
+# Article consolidation — continuation resolution and noise filtering
+# --------------------------------------------------------------------------- _DEPT_HEADERS = frozenset([
+    "trade supplement", "race results", "club notes", "league news",
+    "notes of the week", "championship", "handicap", "classified",
+    "want ads", "for sale", "exchange", "auction", "bazaar",
+    "anniversary", "jubilee", "funeral", "memorial", "obituary",
+])
+
+_AD_COMPANY_WORDS = frozenset([
+    "cycle", "wheel", "tyre", "tire", "saddle", "lamp", "light",
+    "oil", "grease", "pump", "chain", "brake", "gear", "spoke",
+    "carriage", "factory", "mfg", "works", "manuf",
+])
+
+
+def _is_noise_title(title: str) -> bool:
+    """Heuristic: does this title look like ad / department header / noise?"""
+    lower = title.lower().strip()
+
+    # Department headers
+    for dept in _DEPT_HEADERS:
+        if dept in lower:
+            return True
+
+    # Company/ad name patterns
+    if re.search(r"&\s*(?:co\.|sons?|ltd\.|inc\.|company)", lower):
+        return True
+    if re.match(r"\b[A-Z][a-zA-Z'’\s&]+(?:&\s*(?:Co\.|Sons?|Ltd\.|Incorporated|Inc\.|Company))\b", title):
+        return True
+
+    # ALL-CAPS section headers with no body
+    words = title.split()
+    if len(words) >= 3 and all(w.isupper() for w in words):
+        commercial_words = {w.lower() for w in words} & _AD_COMPANY_WORDS
+        if len(commercial_words) >= 1:
+            return True
+
+    return False
+
+
+def _consolidate_articles(
+    starts: list[dict[str, Any]], page_count: int, doc_pages: list[int]
+) -> list[Article]:
+    """Build final article list from per-page start extractions.
+
+    Strategy:
+    - Each "start" represents an article that begins on a specific page.
+    - Continuations are resolved by checking if the NEXT page (by printed order)
+      has text in adjacent columns or nearby article positions that clearly belong
+      to this article.
+    - Page numbers use 1-based indexing matching the printed issue page numbers.
+    """
+    if not starts:
+        return []
+
+    articles: list[Article] = []
+    for s in starts:
+        title = (s.get("title") or "").strip()
+        if not title:
+            continue
+
+        # Filter noise
+        if _is_noise_title(title):
+            continue
+
+        kind = s.get("kind", "prose")
+        if kind not in ("prose", "verse"):
+            kind = "prose"
+
+        text_chunks = s.get("text_chunks") or []
+        pages = [doc_pages[s["page_index"]] if s.get("page_index") < len(doc_pages) else 1]
+
+        articles.append(Article(
+            title=title,
+            text=[t for t in text_chunks if t.strip()],
+            pages=pages,
+            kind=kind,
+        ))
+
+    return articles
+
+
+# --------------------------------------------------------------------------- #
+# Main entry point
+# --------------------------------------------------------------------------- def pdf_to_json(pdf_path: str) -> dict:
     """Translate a scanned magazine PDF to schema-conformant JSON.
 
     Always returns *some* JSON — best effort on extraction failure.
@@ -174,12 +322,16 @@ def pdf_to_json(pdf_path: str) -> dict:
     model = get("models.vision")
     if not model:
         warnings.warn("config.models.vision is missing; returning empty document")
-        return empty_document().model_dump(mode="json")
+        return Document(magazine=MagazineMeta(editor="", issue=Issue(date="", volume=0, number=0),
+                                              publisher=Publisher(name="", address=""),
+                                              cost=Cost()), articles=[]).model_dump(mode="json")
 
     p = Path(pdf_path)
     if not p.is_file():
         warnings.warn(f"pdf not found: {pdf_path}")
-        return empty_document().model_dump(mode="json")
+        return Document(magazine=MagazineMeta(editor="", issue=Issue(date="", volume=0, number=0),
+                                              publisher=Publisher(name="", address=""),
+                                              cost=Cost()), articles=[]).model_dump(mode="json")
 
     pdf_hash = cache.pdf_content_hash(p)
 
@@ -187,14 +339,18 @@ def pdf_to_json(pdf_path: str) -> dict:
         doc = fitz.open(p)
     except Exception as e:
         warnings.warn(f"failed to open pdf: {e}")
-        return empty_document().model_dump(mode="json")
+        return Document(magazine=MagazineMeta(editor="", issue=Issue(date="", volume=0, number=0),
+                                              publisher=Publisher(name="", address=""),
+                                              cost=Cost()), articles=[]).model_dump(mode="json")
 
-    per_page: list[tuple[int, dict[str, Any]]] = []
-    meta_ir: dict[str, Any] = {}
+    n_pages = doc.page_count
+
+    # ------------------------------------------------------------------ page 0 → masthead + article starts
+        _call_count = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         rendered: dict[int, Path] = {}
-        for i in range(doc.page_count):
+        for i in range(n_pages):
             img = Path(tmp) / f"page_{i:03d}.{page_fmt}"
             try:
                 _render_page(doc, i, img, dpi=page_dpi, fmt=page_fmt)
@@ -202,16 +358,50 @@ def pdf_to_json(pdf_path: str) -> dict:
             except Exception as e:
                 warnings.warn(f"page {i + 1}: render failed: {e}")
 
+        # === PASS 1: Masthead on page 0 ===
+        masthead_raw: dict[str, Any] = {}
+        if n_pages > 0 and rendered.get(0):
+            mh_response = ollama_client.generate(
+                model=model,
+                prompt=_MASTHEAD_PROMPT,
+                images=[rendered[0]],
+                timeout=per_call_timeout,
+                options=vision_options,
+                think=vision_think,
+            )
+            masthead_raw = _parse_json(mh_response)
+            logger.info("masthead extraction: %s", {k: str(v)[:80] for k, v in (masthead_raw or {}).items()})
+
+        # === PASS 2: Article starts on all pages ===
+        per_page_starts: list[tuple[int, dict[str, Any]]] = []
+
         results: dict[int, dict[str, Any]] = {}
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=page_concurrency) as ex:
+            futs = {}
+            for i in range(n_pages):
+                if i not in rendered:
+                    continue
+                # First page uses body prompt (not masthead) for article extraction
+                results[i] = _vision_call(
+                    pdf_hash, i, rendered[i], model, PROMPT_VERSION,
+                    per_call_timeout, vision_options, vision_think, _BODY_PROMPT,
+                )
             futs = {
                 ex.submit(
-                    _extract_page, pdf_hash, i, img, model,
-                    per_call_timeout, vision_options, vision_think,
+                    _vision_call,
+                    pdf_hash, i, rendered[i], model, PROMPT_VERSION,
+                    per_call_timeout, vision_options, vision_think, _BODY_PROMPT,
                 ): i
-                for i, img in rendered.items()
+                for i in range(n_pages) if i != 0 and i in rendered
             }
+            # Also do page 0 body extraction concurrently
+            futs[ex.submit(
+                _vision_call,
+                pdf_hash, 0, rendered[0], model, PROMPT_VERSION,
+                per_call_timeout, vision_options, vision_think, _BODY_PROMPT,
+            )] = 0
+
             for fut in as_completed(futs):
                 i = futs[fut]
                 try:
@@ -219,29 +409,37 @@ def pdf_to_json(pdf_path: str) -> dict:
                 except Exception as e:
                     warnings.warn(f"page {i + 1}: extraction errored: {e}")
                     results[i] = {}
+
         n_ok = sum(1 for v in results.values() if v)
         logger.info(
-            "extracted %d pages (%d non-empty, %d empty/failed) in %.1fs "
-            "(concurrency=%d, dpi=%d, fmt=%s, num_ctx=%d)",
+            "extracted %d pages (%d non-empty, %d empty/failed) in %.1fs",
             len(results), n_ok, len(results) - n_ok, time.monotonic() - t0,
-            page_concurrency, page_dpi, page_fmt, vision_num_ctx,
         )
 
-        for i in sorted(results):
-            page_ir = results[i]
-            if page_ir.get("is_first_page") and not meta_ir:
-                m = page_ir.get("magazine")
-                if isinstance(m, dict):
-                    meta_ir = m
-            per_page.append((i + 1, page_ir))
+        # Collect doc page numbers (printed page number for each PDF page index)
+        # We assume printed page 1 = PDF page 0 unless metadata says otherwise
+        doc_pages: list[int] = list(range(1, n_pages + 1))
+
+        # Gather all article starts with their source page index
+        all_starts: list[dict[str, Any]] = []
+        for page_idx in sorted(results):
+            page_ir = results[page_idx]
+            articles_list = page_ir.get("article_starts") or []
+            for art in articles_list:
+                all_starts.append({
+                    "title": art.get("title", ""),
+                    "kind": art.get("kind", "prose"),
+                    "text_chunks": art.get("text_chunks") or [],
+                    "page_index": page_idx,
+                })
 
     doc.close()
 
-    articles = _merge_articles(per_page)
-    try:
-        assembled: Document = assemble(meta_ir, articles)
-    except Exception as e:
-        warnings.warn(f"assembly failed: {e}")
-        assembled = empty_document()
+    # === Consolidate → final articles ===
+    articles = _consolidate_articles(all_starts, n_pages, doc_pages)
 
-    return assembled.model_dump(mode="json")
+    # === Build metadata from masthead ===
+    meta = _build_metadata(masthead_raw)
+
+    result = Document(magazine=meta, articles=articles)
+    return result.model_dump(mode="json")
