@@ -156,16 +156,48 @@ def _wait_for_pod(pod_id: str, timeout: float = 300.0) -> dict:
     sys.exit(f"pod {pod_id} never became ready within {timeout:.0f}s")
 
 
+def _pod_alive(pod_id: str) -> bool | None:
+    """True if the pod still exists, False if confirmed gone (404), None on an
+    inconclusive error. Non-fatal (unlike _api, which sys.exits) — used to confirm
+    teardown and to decide whether to reconnect after an SSH drop."""
+    req = urllib.request.Request(f"{BASE_URL}/pods/{pod_id}", method="GET")
+    req.add_header("Authorization", f"Bearer {_api_key()}")
+    try:
+        with urllib.request.urlopen(req, context=_ssl_ctx()) as resp:
+            resp.read()
+            return True
+    except urllib.error.HTTPError as e:
+        return False if e.code == 404 else None
+    except Exception:
+        return None
+
+
 def _delete_pod(pod_id: str | None) -> None:
+    """Tear down the pod and CONFIRM it is gone before clearing .pod_id.
+
+    The old fire-and-forget version unlinked .pod_id even when the DELETE failed
+    (e.g. a transient network blip — the same one that drops SSH), which left a
+    billed pod running with no local record to retry. Now we retry the DELETE and
+    poll until the API confirms the pod is gone; only then drop .pod_id. If we
+    can't confirm, KEEP .pod_id so run_timed.sh's `down` backstop can retry."""
     if not pod_id:
         return
-    try:
-        print(f">>> destroying pod {pod_id}")
-        _api("DELETE", f"/pods/{pod_id}")
-    except SystemExit:
-        pass
-    finally:
-        POD_FILE.unlink(missing_ok=True)
+    print(f">>> destroying pod {pod_id}")
+    deadline = time.monotonic() + 150.0
+    while time.monotonic() < deadline:
+        try:
+            _api("DELETE", f"/pods/{pod_id}")
+        except SystemExit:
+            pass  # DELETE may 404 (already gone) or transiently fail; confirm below
+        except Exception:
+            pass
+        if _pod_alive(pod_id) is False:
+            print(f">>> pod {pod_id} confirmed destroyed")
+            POD_FILE.unlink(missing_ok=True)
+            return
+        time.sleep(10)
+    print(f">>> WARNING: could not confirm pod {pod_id} destroyed — .pod_id kept so "
+          "`make down` / run_timed.sh can retry. Verify in the RunPod console.")
 
 
 def _ssh_flags(ip: str, port: str) -> list[str]:
@@ -173,7 +205,12 @@ def _ssh_flags(ip: str, port: str) -> list[str]:
     return [
         "-i", str(deploy_key),
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "ServerAliveInterval=30",
+        # Keep the session alive through brief network stalls: probe every 15s and
+        # tolerate up to 8 missed probes (~2 min) before declaring the link dead,
+        # rather than dropping the whole run on a momentary blip.
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=8",
+        "-o", "TCPKeepAlive=yes",
         "-p", port,
     ]
 
@@ -199,6 +236,52 @@ def _ssh_run(ip: str, port: str, cmd: str) -> int:
         ["ssh", "-t", *_ssh_flags(ip, port), f"root@{ip}", cmd],
         cwd=ROOT,
     ).returncode
+
+
+# Re-attach to the detached harness and stream its log until its PID exits. Reused
+# on the first connection and on every reconnect, so a dropped SSH session loses
+# only the live stream — never the run (the harness is nohup'd and keeps going).
+_HARNESS_PID = "/tmp/docswarm_harness.pid"  # outside the repo so git add -A can't stage it
+
+_HARNESS_MONITOR = (
+    f"if [ ! -f {_HARNESS_PID} ] || ! kill -0 \"$(cat {_HARNESS_PID} 2>/dev/null)\" 2>/dev/null; then "
+    "  echo '>>> harness not running (finished, or failed to start); last log lines:'; "
+    "  tail -n 40 /var/log/harness.log 2>/dev/null; exit 0; "
+    "fi; "
+    f"echo \">>> monitoring harness pid $(cat {_HARNESS_PID}); streaming /var/log/harness.log\"; "
+    "tail -n 80 -F /var/log/harness.log 2>/dev/null & TAILPID=$!; "
+    f"while kill -0 \"$(cat {_HARNESS_PID} 2>/dev/null)\" 2>/dev/null; do sleep 5; done; "
+    "kill $TAILPID 2>/dev/null || true; echo '>>> harness process ended'"
+)
+
+
+def _run_and_monitor(ip: str, port: str, run_cmd: str, pod_id: str) -> int:
+    """Run the full launch+monitor command, then survive SSH drops.
+
+    The harness runs detached on the pod, so an SSH reset (rc 255) does NOT mean
+    the run failed — last time the pod kept completing rounds for ~25 min after the
+    laptop's SSH dropped. So on rc 255, if the pod is still alive, reconnect and
+    re-attach to the harness log instead of tearing down a productive (paid) pod.
+    Bounded reconnects; run_timed.sh's SIGTERM still caps total wall-clock."""
+    rc = _ssh_run(ip, port, run_cmd)
+    reconnects = 0
+    while rc == 255 and reconnects < 40:
+        if _pod_alive(pod_id) is False:
+            print(">>> pod is gone; stopping monitor")
+            break
+        reconnects += 1
+        print(f">>> SSH dropped (rc=255) but pod is still up — reconnecting to monitor "
+              f"(attempt {reconnects})")
+        time.sleep(10)
+        reachable = subprocess.run(
+            ["ssh", *_ssh_flags(ip, port), "-o", "ConnectTimeout=10",
+             "-o", "BatchMode=yes", f"root@{ip}", "true"],
+            capture_output=True,
+        ).returncode == 0
+        if not reachable:
+            continue
+        rc = _ssh_run(ip, port, _HARNESS_MONITOR)
+    return rc
 
 
 def _scp(local: Path, ip: str, port: str, remote: str) -> None:
@@ -400,7 +483,11 @@ def up() -> int:
             "PYTHONPATH=/workspace "
             "nohup python -m judge.judge >/var/log/judge.log 2>&1 & "
             "stdbuf -oL tail -n 100 -F /var/log/judge.log 2>/dev/null | sed -u 's/^/[judge] /' & "
-            "echo '>>> starting harness (run_validation.py)'; "
+            # Run the harness DETACHED (nohup, logging to a file) and record its
+            # PID, then monitor it. Decoupling its lifetime from the SSH session
+            # means an SSH drop loses only the live stream — not the run — and
+            # lets launch.py reconnect and re-attach (see _run_and_monitor).
+            "echo '>>> starting harness (run_validation.py, detached)'; "
             "DOCSWARM_CONFIG=/workspace/config.yaml "
             "OLLAMA_URL=http://localhost:11434 "
             # Coder (Claude Code) is pinned to the LOCAL Ollama endpoint. No paid
@@ -411,9 +498,11 @@ def up() -> int:
             "ANTHROPIC_BASE_URL=http://localhost:11434 "
             "ANTHROPIC_AUTH_TOKEN=ollama "
             "PYTHONPATH=/workspace:/workspace/module "
-            "python scripts/run_validation.py"
+            "nohup python scripts/run_validation.py >/var/log/harness.log 2>&1 & "
+            f"echo $! > {_HARNESS_PID}; "
+            + _HARNESS_MONITOR
         )
-        rc = _ssh_run(ip, port, run_cmd)
+        rc = _run_and_monitor(ip, port, run_cmd, pod_id)
         return rc
     finally:
         _delete_pod(pod_id)
