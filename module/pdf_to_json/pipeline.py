@@ -100,7 +100,9 @@ Do NOT output any prose outside the JSON object.
 
 # --------------------------------------------------------------------------- #
 # Helpers
-# --------------------------------------------------------------------------- _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+# --------------------------------------------------------------------------- #
+
+_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _parse_json(blob: str) -> dict[str, Any]:
@@ -126,7 +128,9 @@ def _render_page(doc: fitz.Document, page_index: int, out: Path, dpi: int, fmt: 
 
 # --------------------------------------------------------------------------- #
 # Vision extraction
-# --------------------------------------------------------------------------- _call_count = 0
+# --------------------------------------------------------------------------- #
+
+_call_count = 0
 
 
 def _vision_call(
@@ -172,7 +176,10 @@ def _vision_call(
 
 # --------------------------------------------------------------------------- #
 # Metadata extraction
-# --------------------------------------------------------------------------- def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
+# --------------------------------------------------------------------------- #
+
+
+def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
     """Convert raw masthead JSON into schema MagazineMeta."""
     vol_raw = masthead_raw.get("volume") or ""
     num_raw = masthead_raw.get("number") or ""
@@ -219,7 +226,9 @@ def _vision_call(
 
 # --------------------------------------------------------------------------- #
 # Article consolidation — continuation resolution and noise filtering
-# --------------------------------------------------------------------------- _DEPT_HEADERS = frozenset([
+# --------------------------------------------------------------------------- #
+
+_DEPT_HEADERS = frozenset([
     "trade supplement", "race results", "club notes", "league news",
     "notes of the week", "championship", "handicap", "classified",
     "want ads", "for sale", "exchange", "auction", "bazaar",
@@ -302,7 +311,10 @@ def _consolidate_articles(
 
 # --------------------------------------------------------------------------- #
 # Main entry point
-# --------------------------------------------------------------------------- def pdf_to_json(pdf_path: str) -> dict:
+# --------------------------------------------------------------------------- #
+
+
+def pdf_to_json(pdf_path: str) -> dict:
     """Translate a scanned magazine PDF to schema-conformant JSON.
 
     Always returns *some* JSON — best effort on extraction failure.
@@ -346,7 +358,7 @@ def _consolidate_articles(
     n_pages = doc.page_count
 
     # ------------------------------------------------------------------ page 0 → masthead + article starts
-        _call_count = 0
+    _call_count = 0
 
     with tempfile.TemporaryDirectory() as tmp:
         rendered: dict[int, Path] = {}
