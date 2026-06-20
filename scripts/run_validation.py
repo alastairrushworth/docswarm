@@ -143,14 +143,18 @@ def _git(*args: str, cwd: Path = ROOT, check: bool = True) -> subprocess.Complet
 _NO_CHANGE = "(no code changes)"
 
 
-def _code_change_summary() -> str:
-    """One-line summary of the agent's uncommitted edits to the deliverable since
-    the last round's commit. Recorded into the trend so the agent SEES that its
-    rewrites moved (or, as has been the case, did not move) the score — the
-    cross-round signal that breaks the Groundhog-Day loop where it re-derived the
-    same edit every round with no memory of the last attempt's null result."""
+def _code_change_summary(base: str) -> str:
+    """One-line summary of the agent's edits to the deliverable since `base` (the
+    commit captured *before* the agent turn). Diffing the base — not HEAD —
+    captures changes the agent COMMITTED itself, not only uncommitted ones: a
+    capable coder (north-mini-code) commits its own work, so a `git diff HEAD`
+    saw nothing and both the change-log and the cache-bust missed real edits.
+    Recorded into the trend so the agent SEES whether its rewrites moved the
+    score — the cross-round signal that breaks the Groundhog-Day loop."""
+    if not base:
+        return _NO_CHANGE
     try:
-        diff = _git("diff", "--stat", "HEAD", "--", "module/pdf_to_json", check=False).stdout.strip()
+        diff = _git("diff", "--stat", base, "--", "module/pdf_to_json", check=False).stdout.strip()
     except Exception:
         return _NO_CHANGE
     if not diff:
@@ -250,7 +254,7 @@ def _translate_and_submit(cfg: dict, round_n: int, p: Path) -> dict:
     return fb
 
 
-def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
+def run_round(cfg: dict, round_n: int, base_sha: str = "") -> dict[str, Any]:
     pdfs = _val_pdfs(cfg)
     if not pdfs:
         raise SystemExit(f"no validation PDFs found in {cfg['paths']['val_dir']}")
@@ -258,9 +262,10 @@ def run_round(cfg: dict, round_n: int) -> dict[str, Any]:
     pdf_concurrency = max(1, int(cfg.get("iteration", {}).get("pdf_concurrency", 1)))
 
     # The agent has just edited the deliverable (round > 1). If it changed
-    # anything, bust the persistent vision cache so this round's translation
-    # actually reflects the edit — otherwise temp=0 cache hits freeze the output.
-    code_change = _code_change_summary()
+    # anything — committed or not, hence base_sha (HEAD before the turn) not HEAD —
+    # bust the persistent vision cache so this round's translation actually
+    # reflects the edit; otherwise temp=0 cache hits freeze the output.
+    code_change = _code_change_summary(base_sha)
     if code_change != _NO_CHANGE:
         cleared = _invalidate_vision_cache(cfg)
         logger.info("round %d: deliverable changed [%s] — cleared %d cached page(s)",
@@ -534,10 +539,13 @@ def main() -> int:
     while time.monotonic() < deadline:
         round_n += 1
 
+        # Snapshot HEAD before the agent turn so we can detect its edits whether
+        # it commits them itself or leaves them uncommitted.
+        base_sha = _git("rev-parse", "HEAD", check=False).stdout.strip()
         if round_n > 1 and prev_entry is not None and not args.no_agent:
             _run_developer_agent(cfg, round_n, prev_entry, best_entry, rounds_since_best)
 
-        entry = run_round(cfg, round_n)
+        entry = run_round(cfg, round_n, base_sha)
         agg = entry["aggregate"]
         delta = (agg - prev_aggregate) if prev_aggregate is not None else 0.0
 
