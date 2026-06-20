@@ -36,6 +36,7 @@ import fitz  # PyMuPDF
 
 from . import cache, ollama_client
 from .masthead import extract_masthead, parse_volume, parse_number, _to_date
+from .consolidate import consolidate
 from .config import get
 from .schema import Article, Cost, Document, Issue, MagazineMeta, Publisher
 
@@ -217,8 +218,24 @@ def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
         pub_name = parts[0].strip()
         pub_addr = ", ".join(p.strip() for p in parts[1:]) if len(parts) > 1 else ""
 
+    # Enhanced editor extraction from raw response and fallback patterns
+    editor_val = masthead_raw.get("editor") or ""
+    if not editor_val:
+        # Try to extract editor name from combined publisher line or other fields
+        editor_val = masthead_raw.get("_editor_line", "")
+    if not editor_val and pub_name:
+        # Sometimes editor info is mixed with publisher in the first name
+        # Extract likely name patterns: capitalized, multiple words, no business suffixes
+        for potential_editor in [pub_name, masthead_raw.get("editor_full", "")]:
+            if potential_editor:
+                clean = potential_editor.strip()
+                if (clean and len(clean.split()) >= 1 and
+                    not any(word.lower() in ["ltd.", "inc.", "co.", "and company"] for word in clean.split())):
+                    editor_val = clean
+                    break
+
     return MagazineMeta(
-        editor=masthead_raw.get("editor") or "",
+        editor=editor_val or "",
         issue=Issue(
             date=date_val if isinstance(date_val, str) else (date_val.isoformat() if date_val else ""),
             volume=vol_val if vol_val is not None else 0,
@@ -253,27 +270,105 @@ _AD_COMPANY_WORDS = frozenset([
     "carriage", "factory", "mfg", "works", "manuf",
 ])
 
+_DEPT_SECTIONS = frozenset([
+    # Common department/standing columns in cycling magazines (early 20th century)
+    "trade supplement", "race results", "club notes", "league news",
+    "notes of the week", "championship standings", "handicap", "classified ads",
+    "want ads", "for sale", "exchange advertisements", "auction notices",
+    "bazaar", "anniversary edition", "jubilee special", "memorial supplement",
+    "obituary column", "funeral notice", "in memoriam", "dedication",
+])
+
+_STANDING_COLUMN_PATTERNS = frozenset([
+    "standing department", "permanent feature", "regular column",
+    "fixed item", "recurring section", "weekly roundup",
+    "monthly review", "year in review", "season preview",
+    "pre-season review", "post-season wrap-up",
+])
+
+_AD_PATTERNS = frozenset([
+    "luthy and co", "co. ", "and sons", "& co", "& company",
+    "inc.", "incorporated", "limited", "ltd.", "proprietors",
+    "agents", "dealers", "distributors", "wholesale",
+])
+
 
 def _is_noise_title(title: str) -> bool:
     """Heuristic: does this title look like ad / department header / noise?"""
     lower = title.lower().strip()
 
-    # Department headers
+    # Department headers - broad matching for magazine sections
     for dept in _DEPT_HEADERS:
         if dept in lower:
             return True
 
-    # Company/ad name patterns
-    if re.search(r"&\s*(?:co\.|sons?|ltd\.|inc\.|company)", lower):
-        return True
-    if re.match(r"\b[A-Z][a-zA-Z'’\s&]+(?:&\s*(?:Co\.|Sons?|Ltd\.|Incorporated|Inc\.|Company))\b", title):
-        return True
+    # Standing column patterns - these often appear as recurring sections
+    for pattern in _STANDING_COLUMN_PATTERNS:
+        if pattern in lower:
+            return True
 
-    # ALL-CAPS section headers with no body
+    # Department/standing section titles (often capitalized with dots)
+    if re.search(r"^[A-Z][a-z]+(?:\.[A-Z][a-z]+)*$|", title):
+        words = title.split()
+        if len(words) >= 1:
+            # Capitalized words that look like section headers
+            for word in words[:3]:  # Check first few words only
+                if (word[0].isupper() and len(word) > 1 and
+                    not any(c.isdigit() for c in word) and
+                    word.lower().strip(".!?,:") not in ["and", "or", "the", "of"]):
+                    # Check if it's a magazine department or header
+                    dept_keywords = {"supplement", "standing", "feature", "column", "regular",
+                                    "weekly", "monthly", "yearly", "pre-season", "post-season"}
+                    first_three_words = " ".join(words[:3]).lower()
+                    if any(keyword in first_three_words for keyword in dept_keywords):
+                        return True
+
+    # Company/ad name patterns - broad matching
+    for pattern in _AD_PATTERNS:
+        if pattern.lower() in lower:
+            return True
+
+    # Check for all-caps commercial headers (common in vintage magazines)
     words = title.split()
-    if len(words) >= 3 and all(w.isupper() for w in words):
-        commercial_words = {w.lower() for w in words} & _AD_COMPANY_WORDS
-        if len(commercial_words) >= 1:
+    if len(words) >= 2 and all(w[0].isupper() for w in words[:4] if any(c.isalpha() for c in w)):
+        combined_lower = " ".join([w.lower().strip(".,!") for w in words])
+        # Check if it contains ad-like characteristics
+        ad_indicators = [
+            "company", "co.", "ltd.", "inc.", "and sons", "proprietors",
+            "cycle shop", "workshop", "factory", "mfg", "manufacturers"
+        ]
+        for indicator in ad_indicators:
+            if indicator in combined_lower:
+                return True
+        # Also check for multiple business-like words
+        commercial_words = {w.lower().strip(".,") for w in words[:3] && _AD_COMPANY_WORDS}
+        if len(commercial_words) >= 2:
+            return True
+
+    # Section headers with minimal content (fewer than 3 actual words)
+    clean_title = re.sub(r"[.!?,:]", "", title)
+    header_words = [w for w in clean_title.split() if w and not w.isdigit()]
+
+    # Check if this looks like a section/dept header rather than article
+    section_indicators = [
+        "supplement", "standing", "column", "feature",
+        "section", "department", "division", "part", "chapter"
+    ]
+
+    title_lower_no_punct = clean_title.lower()
+    if any(indicator in title_lower_no_punct for indicator in section_indicators):
+        # For short titles that look like sections
+        if len(header_words) <= 4:
+            return True
+
+    # Check for masthead-like content (often appears as noise article)
+    masthead_patterns = [
+        "editor", "publisher", "office", "address",
+        "contact information", "masthead", "colophon"
+    ]
+    if any(pattern in title_lower_no_punct for pattern in masthead_patterns):
+        # If very short and looks like metadata, it's noise
+        if len(header_words) <= 5:
             return True
 
     return False
@@ -460,7 +555,18 @@ def pdf_to_json(pdf_path: str) -> dict:
     doc.close()
 
     # === Consolidate → final articles ===
-    articles = _consolidate_articles(all_starts, n_pages, doc_pages)
+    consolidated_irs = consolidate(all_starts, pdf_path)
+
+    # Convert ArticleIR objects back to schema Article objects
+    articles: list[Article] = []
+    for art_ir in consolidated_irs:
+        article = Article(
+            title=art_ir.title,
+            text=art_ir.text,
+            pages=art_ir.pages,
+            kind=art_ir.kind,
+        )
+        articles.append(article)
 
     # === Build metadata from masthead ===
     meta = _build_metadata(masthead_raw)
