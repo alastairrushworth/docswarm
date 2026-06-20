@@ -255,123 +255,9 @@ def _build_metadata(masthead_raw: dict[str, Any]) -> MagazineMeta:
 
 # --------------------------------------------------------------------------- #
 # Article consolidation — continuation resolution and noise filtering
+# NOTE: Noise filtering is now handled by consolidate.consolidate()
+# rather than pipeline._consolidate_articles to use its more sophisticated filters.
 # --------------------------------------------------------------------------- #
-
-_DEPT_HEADERS = frozenset([
-    "trade supplement", "race results", "club notes", "league news",
-    "notes of the week", "championship", "handicap", "classified",
-    "want ads", "for sale", "exchange", "auction", "bazaar",
-    "anniversary", "jubilee", "funeral", "memorial", "obituary",
-])
-
-_AD_COMPANY_WORDS = frozenset([
-    "cycle", "wheel", "tyre", "tire", "saddle", "lamp", "light",
-    "oil", "grease", "pump", "chain", "brake", "gear", "spoke",
-    "carriage", "factory", "mfg", "works", "manuf",
-])
-
-_DEPT_SECTIONS = frozenset([
-    # Common department/standing columns in cycling magazines (early 20th century)
-    "trade supplement", "race results", "club notes", "league news",
-    "notes of the week", "championship standings", "handicap", "classified ads",
-    "want ads", "for sale", "exchange advertisements", "auction notices",
-    "bazaar", "anniversary edition", "jubilee special", "memorial supplement",
-    "obituary column", "funeral notice", "in memoriam", "dedication",
-])
-
-_STANDING_COLUMN_PATTERNS = frozenset([
-    "standing department", "permanent feature", "regular column",
-    "fixed item", "recurring section", "weekly roundup",
-    "monthly review", "year in review", "season preview",
-    "pre-season review", "post-season wrap-up",
-])
-
-_AD_PATTERNS = frozenset([
-    "luthy and co", "co. ", "and sons", "& co", "& company",
-    "inc.", "incorporated", "limited", "ltd.", "proprietors",
-    "agents", "dealers", "distributors", "wholesale",
-])
-
-
-def _is_noise_title(title: str) -> bool:
-    """Heuristic: does this title look like ad / department header / noise?"""
-    lower = title.lower().strip()
-
-    # Department headers - broad matching for magazine sections
-    for dept in _DEPT_HEADERS:
-        if dept in lower:
-            return True
-
-    # Standing column patterns - these often appear as recurring sections
-    for pattern in _STANDING_COLUMN_PATTERNS:
-        if pattern in lower:
-            return True
-
-    # Department/standing section titles (often capitalized with dots)
-    if re.search(r"^[A-Z][a-z]+(?:\.[A-Z][a-z]+)*$|", title):
-        words = title.split()
-        if len(words) >= 1:
-            # Capitalized words that look like section headers
-            for word in words[:3]:  # Check first few words only
-                if (word[0].isupper() and len(word) > 1 and
-                    not any(c.isdigit() for c in word) and
-                    word.lower().strip(".!?,:") not in ["and", "or", "the", "of"]):
-                    # Check if it's a magazine department or header
-                    dept_keywords = {"supplement", "standing", "feature", "column", "regular",
-                                    "weekly", "monthly", "yearly", "pre-season", "post-season"}
-                    first_three_words = " ".join(words[:3]).lower()
-                    if any(keyword in first_three_words for keyword in dept_keywords):
-                        return True
-
-    # Company/ad name patterns - broad matching
-    for pattern in _AD_PATTERNS:
-        if pattern.lower() in lower:
-            return True
-
-    # Check for all-caps commercial headers (common in vintage magazines)
-    words = title.split()
-    if len(words) >= 2 and all(w[0].isupper() for w in words[:4] if any(c.isalpha() for c in w)):
-        combined_lower = " ".join([w.lower().strip(".,!") for w in words])
-        # Check if it contains ad-like characteristics
-        ad_indicators = [
-            "company", "co.", "ltd.", "inc.", "and sons", "proprietors",
-            "cycle shop", "workshop", "factory", "mfg", "manufacturers"
-        ]
-        for indicator in ad_indicators:
-            if indicator in combined_lower:
-                return True
-        # Also check for multiple business-like words
-        commercial_words = {w.lower().strip(".,") for w in words[:3] && _AD_COMPANY_WORDS}
-        if len(commercial_words) >= 2:
-            return True
-
-    # Section headers with minimal content (fewer than 3 actual words)
-    clean_title = re.sub(r"[.!?,:]", "", title)
-    header_words = [w for w in clean_title.split() if w and not w.isdigit()]
-
-    # Check if this looks like a section/dept header rather than article
-    section_indicators = [
-        "supplement", "standing", "column", "feature",
-        "section", "department", "division", "part", "chapter"
-    ]
-
-    title_lower_no_punct = clean_title.lower()
-    if any(indicator in title_lower_no_punct for indicator in section_indicators):
-        # For short titles that look like sections
-        if len(header_words) <= 4:
-            return True
-
-    # Check for masthead-like content (often appears as noise article)
-    masthead_patterns = [
-        "editor", "publisher", "office", "address",
-        "contact information", "masthead", "colophon"
-    ]
-    if any(pattern in title_lower_no_punct for pattern in masthead_patterns):
-        # If very short and looks like metadata, it's noise
-        if len(header_words) <= 5:
-            return True
-
-    return False
 
 
 def _consolidate_articles(
@@ -386,6 +272,7 @@ def _consolidate_articles(
       to this article.
     - Page numbers use 1-based indexing matching the printed issue page numbers.
     """
+    # NO LONGER FILTER HERE - consolidate.py will handle sophisticated noise filtering
     if not starts:
         return []
 
@@ -393,10 +280,6 @@ def _consolidate_articles(
     for s in starts:
         title = (s.get("title") or "").strip()
         if not title:
-            continue
-
-        # Filter noise
-        if _is_noise_title(title):
             continue
 
         kind = s.get("kind", "prose")
