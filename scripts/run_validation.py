@@ -166,23 +166,29 @@ def _code_change_summary(base: str) -> str:
     return f"{head} ({last})" if head else last
 
 
-def _invalidate_vision_cache(cfg: dict) -> int:
-    """Delete the persistent per-page vision cache so the next translation reflects
-    the agent's code/prompt edits. The cache lives on the network volume and at
-    temperature=0 returns byte-identical pages, which silently masked every agent
-    change for 9 rounds across 3 runs. Cleared only when code actually changed, so
-    unchanged rounds still get the (correct, cheap) cache."""
-    cache_dir = Path(cfg.get("paths", {}).get("cache_dir", str(ROOT / ".cache/pdf_to_json")))
-    if not cache_dir.is_dir():
-        return 0
-    n = 0
-    for p in cache_dir.glob("*.json"):
+def _warm_train_cache(cfg: dict) -> None:
+    """Pre-extract the train docs so the agent's `score_train.py` inner loop hits a
+    WARM vision cache instead of timing out on cold extraction.
+
+    score_train.py re-runs the translator over data/train and is the agent's fast
+    feedback loop. north-mini-code reported it "timed out due to long vision calls"
+    and committed changes blind as a result. Extracting the train docs once at
+    startup (cache is content-addressed by prompt fingerprint and persists on the
+    volume) makes that loop fast for every subsequent agent turn that doesn't
+    change the prompt — i.e. consolidation/parsing edits, the bulk of the work."""
+    paths = cfg.get("paths", {})
+    d = Path(paths.get("train_dir", str(ROOT / "data/train")))
+    pdf_name = paths.get("pdf_filename", "original.pdf")
+    if not d.is_dir():
+        return
+    docs = [sub / pdf_name for sub in sorted(d.iterdir())
+            if sub.is_dir() and (sub / pdf_name).is_file()]
+    for p in docs:
         try:
-            p.unlink()
-            n += 1
-        except OSError:
-            pass
-    return n
+            logger.info("warming train-doc vision cache: %s", p.parent.name)
+            pdf_to_json(str(p))
+        except Exception as e:
+            logger.warning("train warm failed for %s: %s", p.parent.name, e)
 
 
 def _ensure_git_identity(cfg: dict) -> None:
@@ -261,15 +267,15 @@ def run_round(cfg: dict, round_n: int, base_sha: str = "") -> dict[str, Any]:
 
     pdf_concurrency = max(1, int(cfg.get("iteration", {}).get("pdf_concurrency", 1)))
 
-    # The agent has just edited the deliverable (round > 1). If it changed
-    # anything — committed or not, hence base_sha (HEAD before the turn) not HEAD —
-    # bust the persistent vision cache so this round's translation actually
-    # reflects the edit; otherwise temp=0 cache hits freeze the output.
+    # Record what the agent changed (committed or not — base_sha is HEAD before the
+    # turn) for the trend log. We do NOT blanket-clear the vision cache: it is
+    # content-addressed by prompt fingerprint, so a prompt edit auto-busts while a
+    # consolidation/parsing edit correctly reuses cached pages. Clearing everything
+    # also wiped the train-doc cache the agent's score_train.py inner loop needs,
+    # which made that loop time out and the agent commit blind.
     code_change = _code_change_summary(base_sha)
     if code_change != _NO_CHANGE:
-        cleared = _invalidate_vision_cache(cfg)
-        logger.info("round %d: deliverable changed [%s] — cleared %d cached page(s)",
-                    round_n, code_change, cleared)
+        logger.info("round %d: deliverable changed [%s]", round_n, code_change)
 
     t0 = time.monotonic()
     feedbacks_by_pdf: dict[str, dict] = {}
@@ -535,6 +541,12 @@ def main() -> int:
     prev_aggregate = None
     prev_entry: dict[str, Any] | None = None
     best_entry: dict[str, Any] | None = None
+
+    # Warm the train-doc vision cache once so the agent's score_train.py inner loop
+    # is fast (it timed out cold, so the agent committed changes blind). Skipped if
+    # the agent turn is disabled, since only the agent uses score_train.
+    if not args.no_agent:
+        _warm_train_cache(cfg)
 
     while time.monotonic() < deadline:
         round_n += 1
