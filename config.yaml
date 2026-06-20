@@ -26,17 +26,18 @@ runpod:
   pod_name:          "docswarm"
 
 # ----- Models (Ollama tags) -----
-# qwen3.6:35b is multimodal (Text + Image) and covers all three LLM roles —
-# coder (Claude Code dev agent), vision (per-page extraction) and judge
-# (marking) — so a single 35B model stays resident plus the embedder. This
-# avoids holding a second large model (e.g. nemotron3:33b) in VRAM alongside it,
-# and qwen-VL's dynamic-resolution tiling gives more image detail per page than
-# nemotron's single 256-token slice.
+# All roles run on LOCAL Ollama — no paid LLM provider is ever used.
+# Vision + judge share qwen3.6:35b (multimodal, 24GB, 256K ctx; qwen-VL's
+# dynamic-resolution tiling gives good per-page image detail). The CODER role now
+# uses a dedicated agentic-coding model rather than the general qwen: the general
+# 35B rambled past Claude Code's 64k output cap (exit 1) and thrashed on reloads.
+# north-mini-code-1.0 (Cohere, 30B MoE / 3B active) is purpose-built for agentic
+# tool use, so it emits terse tool calls and — at only 3B active — runs fast and
+# stays resident alongside the vision model (32GB + 24GB + embed fits one 80GB GPU
+# under OLLAMA_MAX_LOADED_MODELS=3, so the agent turn no longer evicts vision).
 models:
-  # qwen3.6:35b is multimodal (Text + Image), 24GB, 256K ctx. The `27b-coding-*`
-  # and `*-mlx-*` tags are MLX (Apple Silicon only) and will 412 on Linux.
-  # All roles run on LOCAL Ollama — no paid LLM provider is ever used.
-  coder:     "qwen3.6:35b"
+  # The `27b-coding-*` and `*-mlx-*` qwen tags are MLX (Apple Silicon only) and 412 on Linux.
+  coder:     "north-mini-code-1.0:q8_0"   # 32GB q8_0; agentic coder for the Claude Code dev agent
   vision:    "qwen3.6:35b"
   judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"       # ~270MB, similarity scoring
