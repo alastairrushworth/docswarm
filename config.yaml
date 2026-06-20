@@ -35,18 +35,11 @@ runpod:
 models:
   # qwen3.6:35b is multimodal (Text + Image), 24GB, 256K ctx. The `27b-coding-*`
   # and `*-mlx-*` tags are MLX (Apple Silicon only) and will 412 on Linux.
+  # All roles run on LOCAL Ollama — no paid LLM provider is ever used.
   coder:     "qwen3.6:35b"
   vision:    "qwen3.6:35b"
   judge:     "qwen3.6:35b"
   embedding: "nomic-embed-text"       # ~270MB, similarity scoring
-  # The developer agent (Claude Code) role. A 35B local model drives the agentic
-  # tool loop poorly — observed exit-1 crashes and no-op rounds. Set
-  # coder_provider: "anthropic" and coder to a real Claude id (e.g.
-  # claude-sonnet-4-6 or claude-opus-4-8) to route ONLY the coder to the Claude
-  # API; vision/judge stay on local Ollama. Requires ANTHROPIC_API_KEY in .env or
-  # the environment. Costs real API spend per round. Default stays "ollama" so a
-  # run without a key still works.
-  coder_provider: "ollama"            # "ollama" (local) | "anthropic" (Claude API)
 
 # ----- Iteration control -----
 iteration:

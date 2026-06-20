@@ -471,11 +471,9 @@ def _run_developer_agent(
     if shutil.which("claude") is None:
         logger.warning("claude CLI not on PATH; skipping developer-agent turn")
         return
-    models = cfg.get("models", {})
-    model = models.get("coder", "qwen3.6:35b")
-    provider = str(models.get("coder_provider", "ollama")).lower()
+    model = cfg.get("models", {}).get("coder", "qwen3.6:35b")
     prompt = _developer_agent_prompt(cfg, round_n, prev_entry, best_entry, rounds_since_best)
-    logger.info("round %d: invoking Claude Code (model=%s, provider=%s)", round_n, model, provider)
+    logger.info("round %d: invoking Claude Code (model=%s, local Ollama)", round_n, model)
     cmd = [
         "claude", "--print",
         "--permission-mode", "bypassPermissions",
@@ -486,22 +484,19 @@ def _run_developer_agent(
     # and exits 1 before doing anything — silently turning every round into a
     # no-op. IS_SANDBOX=1 is the documented escape hatch for disposable
     # containers like this ephemeral pod. The 64k output cap stays as a backstop.
+    #
+    # The coder (qwen3.6:35b) runs on local Ollama and is a reasoning model: left
+    # to think it pours a runaway chain-of-thought into the response and blows the
+    # output cap (observed "exceeded the 64000 output token maximum", exit 1,
+    # Δ+0.000, no edit made). MAX_THINKING_TOKENS=0 disables extended thinking so
+    # it emits the edit directly — the analogue of vision_think=false on the
+    # vision path.
     env = {
         **os.environ,
         "IS_SANDBOX": "1",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+        "MAX_THINKING_TOKENS": "0",
     }
-    if provider != "anthropic":
-        # Local coder (qwen3.6:35b) is a reasoning model: left to think it pours a
-        # runaway chain-of-thought into the response and blows the output cap
-        # (observed "exceeded the 64000 output token maximum", exit 1, Δ+0.000,
-        # no edit made). MAX_THINKING_TOKENS=0 disables extended thinking so it
-        # emits the edit directly — the analogue of vision_think=false, which it
-        # can't use because the coder goes via Ollama's Anthropic-compatible
-        # endpoint (no native `think` param). A real Claude model (provider
-        # "anthropic") is capable of bounded thinking, so we leave it enabled and
-        # rely on the ANTHROPIC_* env launch.py sets for the API route.
-        env["MAX_THINKING_TOKENS"] = "0"
     rc = subprocess.run(
         cmd, cwd=ROOT, check=False, input=prompt, text=True, env=env
     ).returncode
