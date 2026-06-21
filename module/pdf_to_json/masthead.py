@@ -70,7 +70,8 @@ def _str(v: Any) -> str | None:
     if v is None:
         return None
     s = str(v).strip()
-    return s if s else None
+    # Return empty string as empty string, not None (for consistency)
+    return s
 
 
 # --------------------------------------------------------------------------- #
@@ -190,10 +191,16 @@ def extract_masthead(raw: str) -> dict[str, Any]:
     raw_addr = _str(data.get("publisher_address")) or ""
     full_line = _str(data.get("publisher_full_line")) or raw_name
 
+    # Convert empty strings to None for proper filtering in pipeline._build_metadata()
+    if not raw_name:
+        raw_name = None
+    if not raw_addr:
+        raw_addr = None
+
     if raw_name:
-        result["publisher_name"] = raw_name.strip()
+        result["publisher_name"] = str(raw_name).strip()
     if raw_addr:
-        result["publisher_address"] = raw_addr.strip()
+        result["publisher_address"] = str(raw_addr).strip()
     elif full_line and "," in full_line:
         name, addr = parse_publisher_from_full_line(full_line)
         if name and not result.get("publisher_name"):

@@ -475,5 +475,5 @@ def pdf_to_json(pdf_path: str) -> dict:
     # === Build metadata from masthead ===
     meta = _build_metadata(masthead_raw)
 
-    result = Document(magazine=meta, articles=[])
+    result = Document(magazine=meta, articles=articles)
     return result.model_dump(mode="json")
