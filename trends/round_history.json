@@ -2212,5 +2212,54 @@
         ]
       }
     ]
+  },
+  {
+    "round": 4,
+    "timestamp": "2026-06-21T06:41:21Z",
+    "wall_clock_seconds": 14.4,
+    "aggregate": 0.2071,
+    "components": {
+      "schema_validity": 0.5714,
+      "article_count": 0.0,
+      "precision": 1.0,
+      "metadata": 0.3333,
+      "titles": 0.0,
+      "text": 0.0,
+      "order": 0.0,
+      "pages": 0.0
+    },
+    "code_change": "(no code changes)",
+    "model_loadout": "coder=north-mini-code-1.0:q8_0, vision=qwen3.6:35b, judge=qwen3.6:35b, embedding=nomic-embed-text",
+    "per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "aggregate": 0.2071
+      }
+    ],
+    "categorical_errors_per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "errors": [
+          {
+            "category": "missing_article",
+            "count": 12
+          }
+        ]
+      }
+    ],
+    "hints_per_pdf": [
+      {
+        "pdf_id": "sporting-cyclist-vol1959-06",
+        "hints": [
+          "Schema gaps in: magazine.editor, magazine.publisher.name, magazine.publisher.address. Ensure each is present and of the correct type per schema.py.",
+          "You produced 12 fewer article(s) than expected. Investigate dropped or merged items: letters/columns folded together, short notices skipped, or a continuation absorbed into the wrong article.",
+          "Metadata 'editor' is not populated \u2014 locate and extract it.",
+          "Metadata 'issue.date' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "Metadata 'issue.volume' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "Metadata 'issue.number' is materially different from expected. Re-extract it and verify you are reading the correct masthead/colophon region.",
+          "Expected article(s) you did not match appear on page(s): 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37."
+        ]
+      }
+    ]
   }
 ]
