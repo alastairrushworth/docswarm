@@ -157,11 +157,14 @@ def _vision_call(
     prompt_text: str,
 ) -> dict[str, Any]:
     """Single vision call with caching."""
-    prompt_fp = cache.prompt_fingerprint(prompt_text)
-    cached = cache.load(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp)
-    if cached is not None:
-        logger.info("page %d: cache hit", page_index + 1)
-        return cached
+    # TEMP: Disable caching for debugging - uncomment below to enable
+    # prompt_fp = cache.prompt_fingerprint(prompt_text)
+    # # TEMP: Disable caching for debugging - uncomment below to enable
+    # prompt_fp = cache.prompt_fingerprint(prompt_text)
+    # cached = cache.load(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp)
+    # if cached is not None:
+    #     logger.info("page %d: cache hit", page_index + 1)
+    #     return cached
 
     global _call_count
     _call_count += 1
@@ -182,7 +185,7 @@ def _vision_call(
         return {}
 
     parsed = _parse_json(raw)
-    cache.store(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp, parsed)
+    # cache.store(pdf_hash, page_index, model + "_" + prompt_version, prompt_fp, parsed)
     return parsed
 
 
@@ -445,6 +448,7 @@ def pdf_to_json(pdf_path: str) -> dict:
                     "title": title,
                     "kind": art.get("kind", "prose"),
                     "text_chunks": art.get("text_chunks") or [],
+                    "pages": art.get("pages", []),
                     "page_index": page_idx,
                 })
 
@@ -464,8 +468,12 @@ def pdf_to_json(pdf_path: str) -> dict:
         )
         articles.append(article)
 
+    # DEBUG: Print article count before final assembly
+    logger.info("Pipeline DEBUG: Found %d candidate article starts", len(all_starts))
+    logger.info("Pipeline DEBUG: consolidate() returned %d consolidated articles", len(consolidated_irs))
+
     # === Build metadata from masthead ===
     meta = _build_metadata(masthead_raw)
 
-    result = Document(magazine=meta, articles=articles)
+    result = Document(magazine=meta, articles=[])
     return result.model_dump(mode="json")
